@@ -1,0 +1,38 @@
+# Descriptor for the "rig" vehicle-level orchestrator: how to invoke this driver's per-sensor
+# launcher. Descriptive metadata ONLY -- this repo does NOT depend on rig; rig depends on this repo
+# (one-way). rig invokes:  <launcher> <config> <mapped-verb>   e.g.  ouster-up <config> up -d
+service: ouster
+launcher: ouster-up
+verbs:
+  up: "up -d"
+  down: "down"
+  status: "ps"       # rig may append `--format json` to parse `docker compose ps`
+  logs: "logs"
+  config: "config"
+ros_distro: lyrical
+
+# rig's BUILD phase: `rig build` runs <command> <registry> [tag] (cwd = this repo) to build + push
+# the runtime image to the fleet registry. `rig certify` checks the compose pulls exactly these
+# images from RIG_IMAGE_REGISTRY tagged :RIG_IMAGE_TAG (build/pull agreement).
+build:
+  command: tools/build_image.sh
+  images: [ouster_driver]
+
+# Host-facing UDP ports rig doctor checks for clashes across sensors (host networking -> ports are
+# shared vehicle-wide). Dotted paths into the generic sensor config; values must be ints.
+host_ports:
+  - "connection.lidar.lidar_port"
+  - "connection.lidar.imu_port"
+
+# Persisted sensor metadata (~/.ros/{hostname}_metadata.json) lives in a named volume per instance;
+# rig removes it ONLY on final teardown (`rig down --purge`), never on a restart. {name} = instance.
+external_volumes:
+  - "ouster_{name}_metadata"
+
+# Files rig vendors onto the vehicle to run this driver (the deployable "launch surface"). The
+# runtime itself is the published image, so NO src/ or build context belongs here. rigging.yaml
+# itself is always vendored by rig, so it is not listed.
+launch_surface:
+  - ouster-up
+  - tools/render_params.py
+  - docker/compose/compose.deploy.yaml

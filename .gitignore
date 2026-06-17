@@ -1,0 +1,42 @@
+# Build artifacts
+build/
+install/
+log/
+.cache/
+
+# colcon
+.colcon/
+COLCON_IGNORE
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+_deps/
+
+# Vendored upstream — fetched on demand by `just vendor` (local dev) and by the Docker build
+# (`vcs import`). Never committed: this wrapper stays source-free; ouster.repos is the pin.
+/src/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local environment
+.env
+.env.local
+
+# Local tooling state (Claude Code, etc.)
+.claude/
+
+# Launcher staging (rendered per-instance params written by ouster-up)
+/var/

@@ -1,0 +1,31 @@
+# Dev container with workspace bind-mount and host network for DDS. Ouster is a NETWORKED sensor,
+# so no /dev passthrough or privileged mode is needed (unlike the serial/USB drivers).
+#
+# Usage:
+#   docker compose -f docker/compose/compose.dev.yaml up -d
+#   docker compose -f docker/compose/compose.dev.yaml exec dev bash
+#   # inside: just vendor && rosdep install --from-paths src --ignore-src -y && just build
+#
+# Pinned project name so a bare `docker compose -f ... exec dev` stays scoped to THIS driver (the
+# parent-dir default "compose" is shared by every generated driver).
+name: ouster_dev
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: Dockerfile.dev
+      args:
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: ouster_driver:dev
+    container_name: ouster_dev
+    network_mode: host
+    ipc: host
+    volumes:
+      - ../../:/workspace:cached
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - DISPLAY=${DISPLAY:-}
+      - QT_X11_NO_MITSHM=1
+    command: ["sleep", "infinity"]

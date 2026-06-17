@@ -1,0 +1,19 @@
+# Keep the Docker build context small + reproducible. The runtime image build needs only
+# ouster.repos (it fetches upstream itself via `vcs import`) and docker/entrypoints — never the
+# host's vendored src/ (large, and a host build/ from another arch would poison an in-container
+# colcon build), nor any generated trees.
+build/
+install/
+log/
+.cache/
+.git/
+.github/
+.claude/
+/src/
+/var/
+**/__pycache__/
+*.pyc
+*.gcda
+*.gcno
+*.o
+*.tar.gz

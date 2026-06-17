@@ -1,0 +1,47 @@
+# Deployment-grade compose for ONE ouster instance — parameterized + launched by `ouster-up`
+# (which renders the params file and exports the env vars below). Run it via the launcher, not
+# directly.
+#
+# Multi-instance safe: NO container_name; identity comes from the compose project (the rig-injected
+# COMPOSE_PROJECT_NAME, or ouster_<name> standalone — the launcher handles both) and the ROS
+# namespace, so several lidars never collide. Health comes from the runtime image's baked
+# HEALTHCHECK (the os_driver lifecycle state).
+services:
+  driver:
+    # Image precedence (Docker Compose interpolation): OUSTER_IMAGE (a full per-service override,
+    # e.g. a local ouster_driver:runtime) wins; else the rig-injected fleet policy —
+    # RIG_IMAGE_REGISTRY prefixed onto ouster_driver, pulled as :RIG_IMAGE_TAG (what `rig build`
+    # pushed); else the bare local ouster_driver:latest (default dev/standalone behavior).
+    image: ${OUSTER_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ouster_driver:${RIG_IMAGE_TAG:-latest}}
+    network_mode: host          # reach the sensor over UDP + expose ROS 2 topics on the host
+    ipc: host                   # shared-memory transport (Fast DDS) with other host nodes
+    restart: unless-stopped
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      # the launcher's instance namespace, so the baked healthcheck probes ITS node
+      OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
+    volumes:
+      # the single rendered params file, read-only (a single-file mount; not nested in any :ro dir)
+      - ${OUSTER_PARAMS_HOST}:/etc/ouster_driver/params.yaml:ro
+      # persisted sensor metadata (~/.ros/{hostname}_metadata.json) — survives restarts; rig GCs it
+      # only on `rig down --purge`. The container runs as root, so ~ resolves to /root. `metadata` is
+      # a static local alias for the per-instance external volume named below (compose does NOT
+      # interpolate variables in a volume's map KEY — only in values such as `name:`).
+      - metadata:/root/.ros
+    command:
+      - ros2
+      - launch
+      - ouster_ros
+      - driver.launch.py
+      - params_file:=/etc/ouster_driver/params.yaml
+      - ouster_ns:=${OUSTER_NAMESPACE}
+      - viz:=false              # never start rviz inside a headless deploy container
+
+# Per-instance metadata cache. external: true -> compose only USES it (ouster-up creates it on `up`,
+# rig GCs it on `rig down --purge`); the explicit name keeps it un-prefixed so rig can match it
+# against rigging.yaml `external_volumes`.
+volumes:
+  metadata:
+    external: true
+    name: ouster_${OUSTER_NAME}_metadata

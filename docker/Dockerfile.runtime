@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+# Minimal production image for the upstream ouster-ros driver, VENDORED AT BUILD TIME. Self-contained
+# two-stage build: the build stage fetches the pinned upstream source with `vcs import` (from
+# ouster.repos) and compiles it (Release); the runtime stage ships only the install/ overlay on
+# ros-core, with exec-only deps resolved by rosdep (no hand-listed, version-fragile lib names).
+#
+#   docker build -f docker/Dockerfile.runtime -t ouster_driver:<tag> .
+# Cross-arch (Jetson/arm64): docker buildx build --platform linux/arm64 ... --load  — build on an
+# arm64 host; the SDK/PCL compile is painfully slow under qemu emulation.
+#
+# Layer caching: ouster.repos is COPYed alone before `vcs import`, so bumping the pin re-fetches +
+# rebuilds while the apt/rosdep layers stay cached when only the pin changed.
+ARG ROS_DISTRO=lyrical
+
+# ---- build stage ------------------------------------------------------------
+FROM ros:${ROS_DISTRO}-ros-base AS build
+ARG ROS_DISTRO
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git ca-certificates \
+      python3-colcon-common-extensions python3-rosdep python3-vcstool \
+  && rm -rf /var/lib/apt/lists/* \
+  && (rosdep init 2>/dev/null || true)
+
+WORKDIR /workspace
+# Fetch the pinned upstream source (ouster.repos alone first -> cache-friendly bump). At the current
+# pin the Ouster SDK is vendored inside the repo (no submodule); the guarded submodule init in the
+# next layer covers tags that use one instead.
+COPY ouster.repos /workspace/ouster.repos
+RUN vcs import /workspace/src < /workspace/ouster.repos
+RUN git -C /workspace/src/ouster-ros submodule update --init --recursive 2>/dev/null || true
+
+# Resolve every declared dep from the vendored package.xml files (ROS pkgs + system libs: pcl,
+# opencv via cv_bridge, curl, spdlog, jsoncpp, eigen, ...). rosdep, not a hand-maintained apt list.
+RUN apt-get update \
+ && rosdep update --rosdistro "${ROS_DISTRO}" \
+ && rosdep install --from-paths /workspace/src --ignore-src -y --rosdistro "${ROS_DISTRO}" \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build Release. Optional SDK features (pcap/osf/viz/mapping) stay OFF, so their extra runtime libs
+# (libtins/libzip/...) aren't linked or shipped. -Wno-deprecated-declarations matches upstream's
+# own Dockerfile.
+RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
+ && colcon build --base-paths /workspace/src --merge-install \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+                   -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
+
+# ---- runtime stage ----------------------------------------------------------
+FROM ros:${ROS_DISTRO}-ros-core AS runtime
+ARG ROS_DISTRO
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Exec-only runtime deps, resolved by rosdep from the same package.xml manifests (so the list tracks
+# upstream automatically). Copy just the manifests, resolve, drop them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-rosdep ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
+  && rm -rf /var/lib/apt/lists/* \
+  && (rosdep init 2>/dev/null || true)
+COPY --from=build /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
+COPY --from=build /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/deps/ouster_sensor_msgs/package.xml
+RUN apt-get update \
+ && rosdep update --rosdistro "${ROS_DISTRO}" \
+ && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro "${ROS_DISTRO}" \
+      --dependency-types=exec \
+ && rm -rf /tmp/deps /var/lib/apt/lists/*
+
+COPY --from=build /workspace/install /opt/ouster_driver
+# Context is the repo root (the build stage fetches sources itself), so entrypoints live under docker/.
+COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
+COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh
+
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+ENV OUSTER_DRIVER_WORKSPACE=/opt/ouster_driver
+# start-period covers sensor init + configure->activate (the lidar handshake is slower than an IMU);
+# timeout covers the ros2-CLI cold start the probe pays.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
+ENTRYPOINT ["/usr/local/bin/ros-entrypoint.sh"]
+# Bare-run default; the deploy compose overrides with params_file + ouster_ns. viz:=false so a bare
+# `docker run` never tries to start rviz in a headless container.
+CMD ["ros2", "launch", "ouster_ros", "driver.launch.py", "viz:=false"]

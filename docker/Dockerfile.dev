@@ -1,0 +1,75 @@
+# Dev environment for the ouster wrapper. Mirrored by .devcontainer.json so every developer gets the
+# same toolchain. We vendor + build the UPSTREAM ouster-ros here (see `just vendor`), so the image
+# ships the build toolchain + vcstool + rosdep — upstream deps are resolved per-build from the
+# vendored package.xml (NOT hand-listed, so they can't drift) — plus rviz2/rosbag2 for viz + replay.
+#
+# Base: ROS 2 Lyrical on ros:lyrical-ros-base (multi-arch amd64 + arm64 — native on Apple Silicon
+# and Jetson).
+ARG ROS_DISTRO=lyrical
+FROM ros:${ROS_DISTRO}-ros-base AS dev
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ROS_DISTRO
+
+# --- System dev tooling + upstream build prerequisites ----------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git curl wget ca-certificates gdb \
+      python3-pip \
+      python3-colcon-common-extensions \
+      python3-vcstool \
+      python3-rosdep \
+      python3-yaml \
+      ros-${ROS_DISTRO}-rviz2 \
+      ros-${ROS_DISTRO}-rosbag2 \
+      ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
+      sudo tmux vim-nox \
+    && rm -rf /var/lib/apt/lists/* \
+ && (rosdep init 2>/dev/null || true)
+
+# --- Non-root dev user (UID/GID matched to the host) ------------------------
+# The base image ships a default user at UID/GID 1000; reuse/rename/retarget it to ${USER} so files
+# created in the bind-mounted workspace are owned by the host user regardless of which host built it.
+ARG USER=dev
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+    if ! id -u "${USER}" >/dev/null 2>&1; then \
+      existing="$(getent passwd 1000 | cut -d: -f1 || true)"; \
+      if [ -n "${existing}" ]; then \
+        existing_group="$(getent group 1000 | cut -d: -f1 || true)"; \
+        if [ -n "${existing_group}" ] && [ "${existing_group}" != "${USER}" ]; then \
+          groupmod -n "${USER}" "${existing_group}"; \
+        fi; \
+        usermod -l "${USER}" -d "/home/${USER}" -m "${existing}"; \
+      else \
+        groupadd --gid "${GID}" "${USER}"; \
+        useradd --uid "${UID}" --gid "${GID}" -m -s /bin/bash "${USER}"; \
+      fi; \
+    fi; \
+    current_uid="$(id -u "${USER}")"; \
+    current_gid="$(id -g "${USER}")"; \
+    if [ "${current_uid}" != "${UID}" ] || [ "${current_gid}" != "${GID}" ]; then \
+      groupmod -g "${GID}" "${USER}" 2>/dev/null || true; \
+      usermod -u "${UID}" -g "${GID}" "${USER}"; \
+      chown -R "${UID}:${GID}" "/home/${USER}"; \
+    fi; \
+    getent group sudo >/dev/null || groupadd sudo; \
+    usermod -aG sudo "${USER}"; \
+    echo "${USER} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/90-${USER}"; \
+    chmod 0440 "/etc/sudoers.d/90-${USER}"
+
+# `docker compose exec dev bash` bypasses the ENTRYPOINT, so source ROS for interactive shells too.
+RUN printf '\n# ROS 2 environment\nsource /opt/ros/%s/setup.bash\n[ -f /workspace/install/setup.bash ] && source /workspace/install/setup.bash\n' "${ROS_DISTRO}" \
+      >> "/home/${USER}/.bashrc" \
+ && chown "${UID}:${GID}" "/home/${USER}/.bashrc"
+
+COPY entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
+RUN chmod +x /usr/local/bin/ros-entrypoint.sh
+
+USER ${USER}
+WORKDIR /workspace
+SHELL ["/bin/bash", "-c"]
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+ENTRYPOINT ["/usr/local/bin/ros-entrypoint.sh"]
+CMD ["bash"]

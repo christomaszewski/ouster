@@ -1,0 +1,33 @@
+# Example rig sensor config for the ouster driver (a thin wrap of upstream ouster-ros). Copy +
+# rename per instance (e.g. sensors/ouster_top.yaml), edit for your vehicle, then:
+#   ./ouster-up sensors/ouster_top.yaml up -d
+# This is also the config CI's `rig certify` job runs against (the launcher-contract gate).
+#
+# `connection` is the generic, rig-uniform block; tools/render_params.py maps it onto upstream's
+# flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). `driver_params` is
+# copied VERBATIM into the node's ros__parameters (ANY key from upstream config/driver_params.yaml)
+# — do NOT put connection keys there; they are derived from `connection`.
+
+service: ouster
+name: top                       # instance id -> ROS namespace /top; compose project ouster_top (standalone)
+
+connection:
+  type: lidar
+  lidar:
+    sensor_hostname: 192.168.1.50   # REQUIRED: the Ouster sensor's IP or hostname
+    udp_dest: 192.168.1.10          # this host's NIC the sensor streams to (omit to auto-detect)
+    lidar_port: 7502                # host UDP port for lidar packets (rig doctor checks for clashes)
+    imu_port: 7503                  # host UDP port for imu packets   (rig doctor checks for clashes)
+
+ros:
+  namespace: top                # -> ouster_ns:=top -> /top/points, /top/imu, ...
+
+driver_params:                  # verbatim ros__parameters overrides; keys from upstream config/driver_params.yaml
+  lidar_mode: "1024x10"         # 512x10 | 512x20 | 1024x10 | 1024x20 | 2048x10 | 4096x5
+  timestamp_mode: TIME_FROM_INTERNAL_OSC
+  udp_profile_lidar: RNG19_RFL8_SIG16_NIR16
+  point_type: original
+  sensor_frame: ouster_sensor   # upstream defaults are os_sensor / os_lidar / os_imu
+  lidar_frame: ouster_lidar
+  imu_frame: ouster_imu
+  attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss

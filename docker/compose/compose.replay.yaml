@@ -1,0 +1,38 @@
+# Replay a recorded rosbag2 of RAW Ouster packet topics through the upstream processing pipeline and
+# visualize in rviz2. The bag must contain the raw packet topics (lidar_packets / imu_packets /
+# metadata) as recorded by upstream's record.launch.xml — this replays them through os_cloud/os_image
+# exactly like the live driver, with no decoder of ours involved.
+#
+#   OUSTER_REPLAY_BAG=<bag-dir-under-OUSTER_DATA_DIR> \
+#   OUSTER_REPLAY_METADATA=<metadata.json-under-OUSTER_DATA_DIR> \
+#     docker compose -f docker/compose/compose.replay.yaml up
+#
+# Uses the dev image (toolchain + rviz2 + rosbag2). Run `just vendor` on the host first so the
+# bind-mounted src/ is populated; the first run resolves deps + builds the vendored workspace.
+name: ouster_replay
+services:
+  replay:
+    image: ouster_driver:dev
+    container_name: ouster_replay
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      DISPLAY: ${DISPLAY:-}
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - ../../:/workspace:cached
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${OUSTER_DATA_DIR:-../../var/bags}:/data:ro
+    working_dir: /workspace
+    command:
+      - bash
+      - -lc
+      - >
+        rosdep install --from-paths src --ignore-src -y &&
+        colcon build --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release &&
+        source install/setup.bash &&
+        ros2 launch ouster_ros replay.launch.xml
+        bag_file:=/data/${OUSTER_REPLAY_BAG:?export OUSTER_REPLAY_BAG=<bag under OUSTER_DATA_DIR>}
+        metadata:=/data/${OUSTER_REPLAY_METADATA:?export OUSTER_REPLAY_METADATA=<metadata.json under OUSTER_DATA_DIR>}
+        viz:=true

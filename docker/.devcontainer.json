@@ -1,0 +1,36 @@
+{
+  "name": "ouster dev",
+  "build": {
+    "dockerfile": "Dockerfile.dev",
+    "context": ".",
+    "args": {
+      "USER": "dev",
+      "UID": "1000",
+      "GID": "1000"
+    }
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "remoteUser": "dev",
+  "runArgs": [
+    "--name=ouster_dev",
+    "--network=host",
+    "--ipc=host",
+    "--device=/dev/dri:/dev/dri"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-iot.vscode-ros",
+        "redhat.vscode-yaml",
+        "redhat.vscode-xml",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        "files.insertFinalNewline": true,
+        "files.trimTrailingWhitespace": true
+      }
+    }
+  },
+  "postCreateCommand": "rosdep update --rosdistro=lyrical || true"
+}

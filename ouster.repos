@@ -1,0 +1,19 @@
+# Upstream Ouster ROS 2 driver — fetched at image-build time by docker/Dockerfile.runtime
+# (`vcs import --recursive src < ouster.repos`). Nothing upstream is committed to this repo; it
+# lives only in the build and in a gitignored src/ for local dev (`just vendor`). That keeps this
+# wrapper tiny and an upstream update down to a one-line bump here.
+#
+# `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. Upstream's
+# ros2-branch releases are tagged plain `MAJOR.MINOR.PATCH` (newer scheme) and/or per-distro
+# (`kilted-0.14.2`, `rolling-0.14.2`, … all the same commit). Bump this to a newer release tag to
+# update; watch for a future `lyrical-*` tag. See README "Updating upstream".
+#
+# Move to a LAN mirror later with ONLY a `url` change (keep `version`). At this pin the Ouster SDK
+# is vendored INSIDE the upstream repo (no submodule), so a mirror needs just this one repo; some
+# tags instead use a submodule (ouster_example) — the Docker build runs a guarded submodule init to
+# cover both, and such a tag would additionally need the SDK repo mirrored.
+repositories:
+  ouster-ros:
+    type: git
+    url: https://github.com/ouster-lidar/ouster-ros.git
+    version: 0.14.2          # latest stable release tag (commit b2e8cc6) on the ros2 lineage
