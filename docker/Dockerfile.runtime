@@ -29,7 +29,7 @@ WORKDIR /workspace
 # pin the Ouster SDK is vendored inside the repo (no submodule); the guarded submodule init in the
 # next layer covers tags that use one instead.
 COPY ouster.repos /workspace/ouster.repos
-RUN vcs import /workspace/src < /workspace/ouster.repos
+RUN mkdir -p /workspace/src && vcs import /workspace/src < /workspace/ouster.repos
 RUN git -C /workspace/src/ouster-ros submodule update --init --recursive 2>/dev/null || true
 
 # Resolve every declared dep from the vendored package.xml files (ROS pkgs + system libs: pcl,
