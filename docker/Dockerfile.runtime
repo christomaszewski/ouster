@@ -39,12 +39,19 @@ RUN apt-get update \
  && rosdep install --from-paths /workspace/src --ignore-src -y --rosdistro "${ROS_DISTRO}" \
  && rm -rf /var/lib/apt/lists/*
 
+# Lyrical removed ament_target_dependencies (upstream ouster-ros still calls it); inject a
+# backward-compat shim WITHOUT touching upstream sources — scoped to the ouster_ros project via
+# CMAKE_PROJECT_<name>_INCLUDE (see the .cmake file's header). Remove once upstream supports Lyrical.
+COPY docker/ament_target_dependencies_compat.cmake /workspace/ament_compat.cmake
+
 # Build Release. Optional SDK features (pcap/osf/viz/mapping) stay OFF, so their extra runtime libs
 # (libtins/libzip/...) aren't linked or shipped. -Wno-deprecated-declarations matches upstream's
 # own Dockerfile.
 RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
  && colcon build --base-paths /workspace/src --merge-install \
       --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+                   -DCMAKE_PROJECT_ouster_ros_INCLUDE=/workspace/ament_compat.cmake \
+                   -DBUILD_TESTING=OFF \
                    -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
 
 # ---- runtime stage ----------------------------------------------------------
