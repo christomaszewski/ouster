@@ -4,7 +4,11 @@
 # Usage:
 #   docker compose -f docker/compose/compose.dev.yaml up -d
 #   docker compose -f docker/compose/compose.dev.yaml exec dev bash
-#   # inside: just vendor && rosdep install --from-paths src --ignore-src -y && just build
+#   # inside: mkdir -p src && vcs import src < ouster.repos
+#   #         git -C src/ouster-ros submodule update --init --recursive 2>/dev/null || true
+#   #         rosdep install --from-paths src --ignore-src -y
+#   #         colcon build --base-paths src --merge-install \
+#   #           --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
 #
 # Pinned project name so a bare `docker compose -f ... exec dev` stays scoped to THIS driver (the
 # parent-dir default "compose" is shared by every generated driver).

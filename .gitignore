@@ -14,8 +14,8 @@ CMakeFiles/
 compile_commands.json
 _deps/
 
-# Vendored upstream — fetched on demand by `just vendor` (local dev) and by the Docker build
-# (`vcs import`). Never committed: this wrapper stays source-free; ouster.repos is the pin.
+# Vendored upstream — fetched on demand with `vcs import src < ouster.repos` (local dev and the
+# Docker build). Never committed: this wrapper stays source-free; ouster.repos is the pin.
 /src/
 
 # IDE

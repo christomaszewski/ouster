@@ -1,14 +1,13 @@
 # Docker images for the ouster wrapper
 
-Three images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this workspace, the
+Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this workspace, the
 **upstream `ouster-ros` source is fetched at build time** (`vcs import` from
 [`../ouster.repos`](../ouster.repos)) — nothing upstream is committed here.
 
 | Image | What | When |
 |---|---|---|
-| `Dockerfile.runtime` | Multi-stage. Fetches + builds the pinned upstream (Release), then ships only `install/` on `ros:lyrical-ros-core` with exec-only deps (resolved by rosdep). No compilers. | Production deploy + `rig`. |
-| `Dockerfile.dev` | Full toolchain + vcstool + rosdep + rviz2 + rosbag2, non-root user matched to the host UID/GID. | Day-to-day dev; also drives `.devcontainer.json`. |
-| `Dockerfile.ci` | Slim CI runner: toolchain + vcstool + rosdep, root, no GUI. | CI: vendor → rosdep → build → `rig certify`. |
+| `Dockerfile.runtime` | Multi-stage. Fetches + builds the pinned upstream (Release), then ships only `install/` on `ros:lyrical-ros-core` with exec-only deps (resolved by rosdep). No compilers. | Production deploy + `rig`; CI builds it as the compile gate. |
+| `Dockerfile.dev` | Full toolchain + vcstool + rosdep + rviz2 + rosbag2, non-root user matched to the host UID/GID. | Day-to-day dev + replay; also drives `.devcontainer.json`. |
 
 The runtime image resolves deps with `rosdep` (from the vendored `package.xml`) rather than a
 hand-maintained apt list, so it tracks upstream automatically. Optional SDK features
@@ -18,7 +17,7 @@ hand-maintained apt list, so it tracks upstream automatically. Optional SDK feat
 
 ```bash
 tools/build_image.sh <registry> [tag]   # build + push to the fleet registry (rig's build phase)
-just image                              # local build -> ouster_driver:latest
+docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .   # local build, no push
 # Jetson / arm64 (build on an arm64 host — qemu is painfully slow for the C++/PCL compile):
 docker buildx build --platform linux/arm64 -f docker/Dockerfile.runtime -t ouster_driver:jp7 .
 ```
@@ -29,12 +28,14 @@ docker buildx build --platform linux/arm64 -f docker/Dockerfile.runtime -t ouste
 docker compose -f docker/compose/compose.dev.yaml up -d
 docker compose -f docker/compose/compose.dev.yaml exec dev bash
 # inside the container:
-just vendor                                            # vcs import upstream into src/
+mkdir -p src && vcs import src < ouster.repos          # vendor upstream into src/
+git -C src/ouster-ros submodule update --init --recursive 2>/dev/null || true   # some pins use one
 rosdep install --from-paths src --ignore-src -y        # resolve upstream deps
-just build                                             # colcon build (Release)
+colcon build --base-paths src --merge-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
 ```
 
-Or via VS Code: `F1` → "Dev Containers: Reopen in Container".
+Or via VS Code: `F1` → "Dev Containers: Reopen in Container" (uses `.devcontainer.json`).
 
 ## Replay (no hardware)
 
@@ -94,4 +95,5 @@ At deploy time the compose resolves the image as `OUSTER_IMAGE` (full per-servic
 policy; `rig build` pushes the same ref) -> bare local `ouster_driver:latest`.
 
 The launcher contract is executable: `rig certify --repo . --config sensors/ouster.example.yaml`
-(CI runs it on every push).
+— run it from a sibling `rig` checkout (e.g. `../bringup/rig certify …`); CI checks out the rig
+repo and runs it on every push.

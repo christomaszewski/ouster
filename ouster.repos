@@ -1,6 +1,6 @@
 # Upstream Ouster ROS 2 driver — fetched at image-build time by docker/Dockerfile.runtime
-# (`vcs import --recursive src < ouster.repos`). Nothing upstream is committed to this repo; it
-# lives only in the build and in a gitignored src/ for local dev (`just vendor`). That keeps this
+# (`vcs import` + a guarded submodule init). Nothing upstream is committed to this repo; it
+# lives only in the build and in a gitignored src/ for local dev (`vcs import`). That keeps this
 # wrapper tiny and an upstream update down to a one-line bump here.
 #
 # `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. Upstream's

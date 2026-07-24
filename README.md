@@ -32,26 +32,31 @@ ouster/
 ├── ouster.repos              # upstream pin (vcstool)
 ├── rigging.yaml              # rig descriptor
 ├── ouster-up                 # rig launcher (networked; no serial branch)
-├── justfile                  # dev tasks: vendor / build / image / run / replay / certify / dev
 ├── sensors/ouster.example.yaml
 ├── tools/
 │   ├── render_params.py      # generic rig config -> ouster driver_params.yaml
 │   └── build_image.sh        # rig build phase: build + push runtime image
 ├── docker/
 │   ├── Dockerfile.runtime    # multi-stage: vcs import + rosdep + colcon (Release)
-│   ├── Dockerfile.dev/.ci
+│   ├── Dockerfile.dev
 │   ├── entrypoints/{ros-entrypoint,healthcheck}.sh
 │   └── compose/{compose.deploy,compose.dev,compose.replay}.yaml
-└── src/                      # GITIGNORED — upstream fetched here by `just vendor` / the build
+└── src/                      # GITIGNORED — upstream fetched here by `vcs import` / the build
 ```
 
 ## Quick start (local dev, no rig)
 
 ```bash
-just vendor                              # vcs import upstream into src/ (gitignored)
-just build                               # colcon build (needs a ROS 2 lyrical env)
-#   …or build the deployable image instead:
-just image                               # -> ouster_driver:latest
+# vendor upstream into src/ (gitignored; needs vcstool — apt install python3-vcstool):
+mkdir -p src && vcs import src < ouster.repos
+git -C src/ouster-ros submodule update --init --recursive 2>/dev/null || true   # some pins use one
+
+# colcon build (needs a ROS 2 lyrical env; first time: rosdep install --from-paths src --ignore-src -y):
+colcon build --base-paths src --merge-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
+
+#   …or skip the local toolchain and build the deployable image instead:
+docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .
 
 cp sensors/ouster.example.yaml sensors/ouster_top.yaml   # edit sensor_hostname / ports
 ./ouster-up sensors/ouster_top.yaml up                   # foreground (Ctrl-C to stop)
@@ -74,7 +79,8 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
 ## Updating upstream
 
 1. Bump `version:` in [`ouster.repos`](ouster.repos) to a newer upstream release tag.
-2. Rebuild: `tools/build_image.sh <registry> [tag]` (or `just image`).
+2. Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
+   `docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .`).
 3. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
 4. Commit the `ouster.repos` change (e.g. `vendor ouster-ros 0.x.y`).
 

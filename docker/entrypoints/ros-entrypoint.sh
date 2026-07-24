@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sources the ROS environment and the workspace overlay (if present), then
-# execs the given command. Used as the ENTRYPOINT for all three Dockerfiles.
+# execs the given command. Used as the ENTRYPOINT for both Dockerfiles (runtime + dev).
 #
 # NOTE: ROS setup.bash scripts reference variables that may not be set yet
 # (AMENT_TRACE_SETUP_FILES, AMENT_PYTHON_EXECUTABLE, etc.) — we cannot enable
