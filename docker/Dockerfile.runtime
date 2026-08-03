@@ -62,8 +62,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Exec-only runtime deps, resolved by rosdep from the same package.xml manifests (so the list tracks
 # upstream automatically). Copy just the manifests, resolve, drop them.
+# Both RMWs are baked in; the deploy compose selects one per instance via RMW_IMPLEMENTATION
+# (default rmw_fastrtps_cpp). rmw_zenoh_cpp additionally needs a Zenoh router reachable on
+# localhost — see docker/README.md "RMW selection / Zenoh".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-rosdep ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
+      python3-rosdep ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
   && rm -rf /var/lib/apt/lists/* \
   && (rosdep init 2>/dev/null || true)
 COPY --from=build /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml

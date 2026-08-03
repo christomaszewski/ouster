@@ -14,11 +14,18 @@ services:
     # pushed); else the bare local ouster_driver:latest (default dev/standalone behavior).
     image: ${OUSTER_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ouster_driver:${RIG_IMAGE_TAG:-latest}}
     network_mode: host          # reach the sensor over UDP + expose ROS 2 topics on the host
-    ipc: host                   # shared-memory transport (Fast DDS) with other host nodes
+    ipc: host                   # shared-memory transport (Fast DDS; inert under zenoh)
     restart: unless-stopped
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      # both RMWs ship in the image; export RMW_IMPLEMENTATION=rmw_zenoh_cpp to switch. The
+      # driver NEVER starts a zenoh router — that is rig-managed infrastructure; the session
+      # connects out (default tcp/localhost:7447, reachable via host networking).
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      # rig-injectable zenoh session tuning: semicolon-separated config overrides, e.g.
+      # ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/192.168.1.1:7447"]' to reach a router
+      # that is not on localhost. Empty = zenoh defaults. See docker/README.md.
+      ZENOH_CONFIG_OVERRIDE: ${ZENOH_CONFIG_OVERRIDE:-}
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
     volumes:

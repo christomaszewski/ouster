@@ -76,6 +76,11 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   `point_type`, `sensor_frame`/`lidar_frame`/`imu_frame`, `attempt_reconnect`, …). Do **not** put
   connection keys here — they come from the `connection` block.
 
+The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
+`RMW_IMPLEMENTATION=rmw_zenoh_cpp` before `ouster-up` to switch. The driver never runs the Zenoh
+router — that is rig-managed infrastructure the session connects out to (endpoint overridable via
+`ZENOH_CONFIG_OVERRIDE`) — see [docker/README.md](docker/README.md) "RMW selection / Zenoh".
+
 ## Updating upstream
 
 1. Bump `version:` in [`ouster.repos`](ouster.repos) to a newer upstream release tag.

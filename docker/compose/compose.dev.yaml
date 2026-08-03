@@ -1,4 +1,5 @@
-# Dev container with workspace bind-mount and host network for DDS. Ouster is a NETWORKED sensor,
+# Dev container with workspace bind-mount and host network for ROS 2 traffic (DDS discovery, or
+# the zenoh router under rmw_zenoh_cpp). Ouster is a NETWORKED sensor,
 # so no /dev passthrough or privileged mode is needed (unlike the serial/USB drivers).
 #
 # Usage:
@@ -30,6 +31,8 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      - ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE:-}
       - DISPLAY=${DISPLAY:-}
       - QT_X11_NO_MITSHM=1
     command: ["sleep", "infinity"]

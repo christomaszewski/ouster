@@ -12,6 +12,9 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "remoteUser": "dev",
+  "containerEnv": {
+    "RMW_IMPLEMENTATION": "${localEnv:RMW_IMPLEMENTATION}"
+  },
   "runArgs": [
     "--name=ouster_dev",
     "--network=host",

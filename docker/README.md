@@ -50,6 +50,44 @@ OUSTER_REPLAY_METADATA=my_capture_metadata.json \
   docker compose -f docker/compose/compose.replay.yaml up
 ```
 
+## RMW selection / Zenoh
+
+Both images bake two RMWs: `rmw_fastrtps_cpp` (the default) and `rmw_zenoh_cpp`. Every compose
+file passes `RMW_IMPLEMENTATION` through, so switching is an env var — no rebuild:
+
+```bash
+RMW_IMPLEMENTATION=rmw_zenoh_cpp ./ouster-up sensors/ouster_top.yaml up -d
+```
+
+**The driver never starts a Zenoh router.** The router is host-level infrastructure — under rig
+it is a rig-managed infrastructure service, exactly like the registry; bringing this service up
+or down never touches it. Each driver instance only opens a *session* that connects out to the
+existing router — by default at zenoh's `tcp/localhost:7447`, which host networking makes
+reachable. If the rig-managed router listens elsewhere, point the session at it with the
+rig-injectable override the deploy compose passes through (no rebuild, no compose edit):
+
+```bash
+ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/192.168.1.1:7447"]' \
+RMW_IMPLEMENTATION=rmw_zenoh_cpp ./ouster-up sensors/ouster_top.yaml up -d
+```
+
+Beware: rmw_zenoh silently ignores a malformed override (no warning, falls back to defaults) —
+if the endpoint doesn't seem to take effect, check the override syntax before debugging zenoh.
+
+**Rig-less dev only:** with no rig to provide the router, the runtime image doubles as the router
+image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the driver's
+`os_driver` node, which is meaningless for a router and would leave the container permanently
+unhealthy):
+
+```bash
+docker run -d --restart unless-stopped --network host --no-healthcheck \
+  --name zenoh_router ouster_driver:latest ros2 run rmw_zenoh_cpp rmw_zenohd
+```
+
+The driver's own healthcheck inherits the same `RMW_IMPLEMENTATION` and zenoh config, so health
+tracks the RMW actually in use — with the router down or unreachable the driver reports
+unhealthy, by design.
+
 ## Deployment / `rig` integration
 
 This driver plugs into the vehicle-level `rig` orchestrator as a first-class service — one-way: the
