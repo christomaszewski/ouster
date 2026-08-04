@@ -10,8 +10,13 @@ Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this
 | `Dockerfile.dev` | Full toolchain + vcstool + rosdep + rviz2 + rosbag2, non-root user matched to the host UID/GID. | Day-to-day dev + replay; also drives `.devcontainer.json`. |
 
 The runtime image resolves deps with `rosdep` (from the vendored `package.xml`) rather than a
-hand-maintained apt list, so it tracks upstream automatically. Optional SDK features
-(pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime correct and slim.
+hand-maintained apt list, so it tracks upstream automatically — with two slimming carve-outs:
+apt Recommends are off stage-wide, and `pcl_conversions`/`cv_bridge` are skipped at exec time
+because the driver uses them header-only (their debs hard-depend on `libpcl-dev`/`libopencv-dev`,
+which would drag ~5 GB of compilers, VTK, Java and Boost -dev into the image); the three OpenCV
+runtime libs the binaries do link are derived from cv_bridge's own deb metadata at build time.
+Optional SDK features (pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime
+correct and slim.
 Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at
 0.14.2 but declared build-only), [`runtime_extra_deps/package.xml`](runtime_extra_deps/package.xml)
 patches the gap through the same rosdep pass, and an `ldd` gate in `Dockerfile.runtime` fails the

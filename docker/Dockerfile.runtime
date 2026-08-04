@@ -63,6 +63,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Exec-only runtime deps, resolved by rosdep from the same package.xml manifests (so the list tracks
 # upstream automatically). Copy just the manifests, resolve, drop them.
+# Recommends off stage-wide — rosdep's apt calls don't pass --no-install-recommends themselves.
+RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\n' \
+      > /etc/apt/apt.conf.d/99-no-recommends
 # Both RMWs are baked in; the deploy compose selects one per instance via RMW_IMPLEMENTATION
 # (default rmw_fastrtps_cpp). rmw_zenoh_cpp additionally needs a Zenoh router reachable on
 # localhost — see docker/README.md "RMW selection / Zenoh".
@@ -75,11 +78,21 @@ COPY --from=build /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/
 # Patch upstream manifest gaps (exec deps that are linked but not declared — see the file's header):
 # rides the same rosdep pass as the upstream manifests, so nothing is hand-pinned to a soname.
 COPY docker/runtime_extra_deps/package.xml /tmp/deps/ouster_wrapper_runtime_deps/package.xml
+# pcl_conversions and cv_bridge are skipped: the driver uses both HEADER-ONLY — the shipped .so's
+# link no libpcl* and no libcv_bridge (the ldd gate below is the proof) — yet their debs
+# hard-depend on libpcl-dev/libopencv-dev, dragging ~5 GB of toolchain (gcc/gfortran), VTK, Java
+# and Boost -dev into an exec-only image. The three OpenCV runtime libs the driver DOES link
+# (core/imgcodecs/imgproc) are derived from cv_bridge's own deb metadata below, so the sonames
+# stay distro-maintained, never hand-pinned here. If a future pin starts linking either library
+# for real, the ldd gate fails the build and this carve-out must be revisited.
 RUN apt-get update \
  && rosdep update --rosdistro "${ROS_DISTRO}" \
  && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro "${ROS_DISTRO}" \
-      --dependency-types=exec \
- && rm -rf /tmp/deps /var/lib/apt/lists/*
+      --dependency-types=exec --skip-keys "pcl_conversions cv_bridge" \
+ && apt-get install -y --no-install-recommends \
+      $(apt-cache depends --no-recommends "ros-${ROS_DISTRO}-cv-bridge" \
+        | awk '/Depends:/{print $2}' | grep '^libopencv-' | grep -v -- '-dev$') \
+ && rm -rf /tmp/deps /var/lib/apt/lists/* /root/.ros
 
 COPY --from=build /workspace/install /opt/ouster_driver
 # Gate: every shipped ELF must resolve ALL its shared libs against exactly what this stage
