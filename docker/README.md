@@ -12,6 +12,11 @@ Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this
 The runtime image resolves deps with `rosdep` (from the vendored `package.xml`) rather than a
 hand-maintained apt list, so it tracks upstream automatically. Optional SDK features
 (pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime correct and slim.
+Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at
+0.14.2 but declared build-only), [`runtime_extra_deps/package.xml`](runtime_extra_deps/package.xml)
+patches the gap through the same rosdep pass, and an `ldd` gate in `Dockerfile.runtime` fails the
+image build if any shipped binary still misses a shared library — so a future pin bump can't
+reintroduce this class of bug silently.
 
 ## Build the runtime image
 

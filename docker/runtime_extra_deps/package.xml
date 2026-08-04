@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- Supplemental EXEC deps for gaps in the upstream manifests: at pin 0.14.2 the SDK's core
+     ouster_client links libzip UNCONDITIONALLY (find_package(libzip REQUIRED) + src/zip.cpp —
+     BUILD_OSF=OFF does not gate it), yet upstream ouster-ros/package.xml declares libzip-dev as
+     build_depend only, so an exec-only rosdep resolve ships no libzip.so and the driver dies at
+     dlopen. This manifest rides the SAME rosdep pass as the upstream manifests — no hand-pinned
+     soname packages (libzip-dev apt-depends on the correct runtime lib for the distro). The ldd
+     gate in Dockerfile.runtime fails the build if a pin bump opens a new gap; extend this list
+     when it fires. Proper fix belongs upstream: an <exec_depend> in ouster-ros/package.xml. -->
+<package format="3">
+  <name>ouster_wrapper_runtime_deps</name>
+  <version>0.0.1</version>
+  <description>Exec-dep patch for upstream ouster-ros manifest gaps (see header comment)</description>
+  <maintainer email="christomaszewski@gmail.com">Chris Tomaszewski</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>libzip-dev</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
