@@ -97,6 +97,20 @@ The only coupling to upstream is its launch CLI + param names. If `driver.launch
 build you also need an apt/rosdep mirror — the dependency install is a separate network dependency
 from the source fetch.
 
+## Releasing
+
+The service is published in the public rig registry as `public/ouster`
+([rig-registry-public](https://github.com/christomaszewski/rig-registry-public)). To cut a release:
+
+```bash
+gh release create v0.2.0 --generate-notes    # tag + GitHub release in one step
+```
+
+The `registry-release` workflow then updates the registry entry (version + pinned `source.rev`)
+and regenerates its index automatically. One-time setup: a `RIG_REGISTRY_TOKEN` Actions secret in
+this repo — a fine-grained PAT scoped to `rig-registry-public` with Contents read/write only.
+Release tags must be exact `vX.Y.Z`.
+
 ## License
 
 [Apache 2.0](LICENSE) for this wrapper. Upstream `ouster-ros` ships under its own license, fetched
