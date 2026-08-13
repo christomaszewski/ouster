@@ -11,6 +11,12 @@ verbs:
   config: "config"
 ros_distro: lyrical
 
+# Example config `rig init` / `rig fetch` scaffold new instances from (copy-then-edit starting
+# material). The sensors/*.example.yaml glob would discover it anyway — declaring it makes the
+# linkage contractual: registry consumers reach it through the pinned source.repo+rev.
+examples:
+  - sensors/ouster.example.yaml
+
 # rig's BUILD phase: `rig build` runs <command> <registry> [tag] (cwd = this repo) to build + push
 # the runtime image to the fleet registry. `rig certify` checks the compose pulls exactly these
 # images from RIG_IMAGE_REGISTRY tagged :RIG_IMAGE_TAG (build/pull agreement).
