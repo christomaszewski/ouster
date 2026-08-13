@@ -30,4 +30,7 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
   sensor_frame: ouster_sensor   # upstream defaults are os_sensor / os_lidar / os_imu
   lidar_frame: ouster_lidar
   imu_frame: ouster_imu
+  point_cloud_frame: ouster_lidar   # frame clouds/scans are stamped in; must EQUAL the value of
+                                    # lidar_frame or sensor_frame, so rename it TOGETHER with them
+                                    # (unset -> follows lidar_frame; mismatch -> warn + lidar_frame)
   attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss
