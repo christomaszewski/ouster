@@ -34,3 +34,22 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
                                     # lidar_frame or sensor_frame, so rename it TOGETHER with them
                                     # (unset -> follows lidar_frame; mismatch -> warn + lidar_frame)
   attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss
+
+# zenoh:                        # OPTIONAL — rmw_zenoh only (RMW_IMPLEMENTATION=rmw_zenoh_cpp);
+#                               # inert under the default Fast DDS. Same knob shape as the
+#                               # rig-infra ros2-bag-logger — keep the fleet's SHM knobs in sync.
+#   shared_memory: true         # opt this instance's zenoh session into shared memory. SHM is
+#                               # negotiated PER LINK: a subscriber uses it only if ITS session
+#                               # also enables SHM (the bag logger has the identical knob), both
+#                               # containers run ipc: host (this driver's compose does — the
+#                               # peer's must too), and every participant runs the same ROS
+#                               # distro's zenoh. ANYTHING unmet = silent per-link fallback to
+#                               # TCP loopback — no error, no log. Verify by watching `lo`
+#                               # traffic (the /<ns>/points bytes vanish when SHM engages), not
+#                               # by reading configs.
+#   shm_pool_mb: 256            # publisher-side SHM pool for the whole session. Size it >=
+#                               # subscriber QoS depth x expanded cloud size; rmw_zenoh's 48 MB
+#                               # default holds only ~8-16 big clouds. This driver PUBLISHES
+#                               # /<ns>/points, so 256 is the recommended floor here. Omit to
+#                               # keep the shipped default. Ignored (with a warning) unless
+#                               # shared_memory is true.

@@ -15,8 +15,9 @@
 
 The sensor config is the single source of truth (uniform across all rig services). `driver_params`
 is OPAQUE -- copied verbatim into ros__parameters -- while the `connection` block is DERIVED onto
-upstream's flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). Used by
-`ouster-up`:
+upstream's flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). The
+optional `zenoh:` block never reaches the params doc: it is validated here and emitted as env
+tokens (`--env` mode) for the entrypoint's in-container SHM opt-in. Used by `ouster-up`:
 
   render_params.py <config.yaml>          # -> the ROS 2 params YAML on stdout
   render_params.py --env <config.yaml>    # -> SERVICE/NAME/NAMESPACE/TYPE env lines
@@ -80,6 +81,40 @@ def derive_connection(connection: dict) -> dict:
     return out
 
 
+def derive_zenoh(zenoh) -> tuple:
+    """Validate the OPTIONAL top-level `zenoh:` block -> (shm_enable, shm_pool_bytes, warnings).
+
+    Fleet-uniform knob -- the rig-infra ros2-bag-logger takes the IDENTICAL block; keep the shape
+    in sync. `shared_memory: true` opts this instance's zenoh session into shared memory;
+    `shm_pool_mb` sizes the publisher-side SHM pool (absent -> 0 -> keep rmw_zenoh's shipped
+    default). Consumed by the image's entrypoint ONLY under rmw_zenoh_cpp -- inert under Fast DDS.
+    Unknown keys are a HARD error: unmet SHM preconditions fall back to TCP loopback silently, so
+    a typo here must not pass as "configured".
+    """
+    if not isinstance(zenoh, dict):
+        sys.stderr.write("render_params: `zenoh:` must be a mapping\n")
+        sys.exit(2)
+    unknown = sorted(set(zenoh) - {"shared_memory", "shm_pool_mb"})
+    if unknown:
+        sys.stderr.write(f"render_params: unknown zenoh key(s): {', '.join(unknown)} "
+                         "(supported: shared_memory, shm_pool_mb)\n")
+        sys.exit(2)
+    enable = zenoh.get("shared_memory", False)
+    if not isinstance(enable, bool):
+        sys.stderr.write("render_params: zenoh.shared_memory must be a bool\n")
+        sys.exit(2)
+    pool_mb = zenoh.get("shm_pool_mb")
+    if pool_mb is not None and (isinstance(pool_mb, bool)
+                                or not isinstance(pool_mb, int) or pool_mb <= 0):
+        sys.stderr.write("render_params: zenoh.shm_pool_mb must be a positive integer (MB)\n")
+        sys.exit(2)
+    warns = []
+    if pool_mb is not None and not enable:
+        warns.append("zenoh.shm_pool_mb is ignored without zenoh.shared_memory: true")
+        pool_mb = None
+    return enable, (pool_mb or 0) * 1024 * 1024, warns
+
+
 def main() -> int:
     args = sys.argv[1:]
     env_mode = bool(args and args[0] == "--env")
@@ -97,9 +132,15 @@ def main() -> int:
     connection = cfg.get("connection") or {}
     ttype = str(connection.get("type") or "lidar")
     namespace = require_ident("ros.namespace", str((cfg.get("ros") or {}).get("namespace") or name))
+    shm_enable, shm_pool_bytes, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
 
     if env_mode:
-        lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}", f"TYPE={ttype}"]
+        # warn only where the knob is CONSUMED (params mode never reads `zenoh:`), so one
+        # ouster-up run -- which invokes both modes -- surfaces each warning exactly once
+        for warn in zenoh_warns:
+            sys.stderr.write("render_params: " + warn + "\n")
+        lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}", f"TYPE={ttype}",
+                 f"ZENOH_SHM_ENABLE={int(shm_enable)}", f"ZENOH_SHM_POOL_BYTES={shm_pool_bytes}"]
         print("\n".join(lines))
         return 0
 

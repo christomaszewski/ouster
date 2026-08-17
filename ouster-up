@@ -48,6 +48,12 @@ export OUSTER_PARAMS_HOST="$PARAMS_HOST"
 export OUSTER_NAMESPACE="$NAMESPACE"
 export OUSTER_NAME="$NAME"
 
+# Opt-in zenoh shared memory, derived from the config's `zenoh:` block (absent = 0/off; see the
+# catalog entry in sensors/ouster.example.yaml). Plain tokens, no host paths -> bake-safe. The
+# image's entrypoint acts on them ONLY under RMW_IMPLEMENTATION=rmw_zenoh_cpp (inert under Fast DDS).
+export OUSTER_ZENOH_SHM_ENABLE="$ZENOH_SHM_ENABLE"
+export OUSTER_ZENOH_SHM_POOL_BYTES="$ZENOH_SHM_POOL_BYTES"
+
 FILES=(-f "$REPO/docker/compose/compose.deploy.yaml")
 
 # Verbs: `status` -> `ps`; everything else is forwarded to `docker compose` verbatim. No args = up.

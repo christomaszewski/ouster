@@ -14,7 +14,9 @@ services:
     # pushed); else the bare local ouster_driver:latest (default dev/standalone behavior).
     image: ${OUSTER_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}ouster_driver:${RIG_IMAGE_TAG:-latest}}
     network_mode: host          # reach the sensor over UDP + expose ROS 2 topics on the host
-    ipc: host                   # shared-memory transport (Fast DDS; inert under zenoh)
+    ipc: host                   # shared-memory transport: Fast DDS SHM, and LOAD-BEARING for zenoh
+                                # SHM (zenoh.shared_memory) — SHM engages per link only between
+                                # sessions sharing the host IPC namespace; else silent TCP fallback
     restart: unless-stopped
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
@@ -26,6 +28,13 @@ services:
       # ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/192.168.1.1:7447"]' to reach a router
       # that is not on localhost. Empty = zenoh defaults. See docker/README.md.
       ZENOH_CONFIG_OVERRIDE: ${ZENOH_CONFIG_OVERRIDE:-}
+      # opt-in zenoh shared memory, launcher-derived from the config's `zenoh:` block (see the
+      # catalog entry in sensors/ouster.example.yaml). The entrypoint acts on these ONLY under
+      # rmw_zenoh_cpp (inert under Fast DDS, the default): it patches a COPY of rmw_zenoh's
+      # shipped session config inside the container and exports ZENOH_SESSION_CONFIG_URI at it —
+      # runtime-generated file, no host paths, so a baked deployment stays self-contained.
+      ZENOH_SHM_ENABLE: ${OUSTER_ZENOH_SHM_ENABLE:-0}
+      ZENOH_SHM_POOL_BYTES: ${OUSTER_ZENOH_SHM_POOL_BYTES:-0}
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
     volumes:

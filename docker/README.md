@@ -84,6 +84,21 @@ RMW_IMPLEMENTATION=rmw_zenoh_cpp ./ouster-up sensors/ouster_top.yaml up -d
 Beware: rmw_zenoh silently ignores a malformed override (no warning, falls back to defaults) —
 if the endpoint doesn't seem to take effect, check the override syntax before debugging zenoh.
 
+**Shared memory (opt-in).** rmw_zenoh ships SHM support compiled in but disabled. The sensor
+config's `zenoh:` block (see the commented catalog entry in
+[`../sensors/ouster.example.yaml`](../sensors/ouster.example.yaml)) opts this instance in: at
+container start the entrypoint patches a **copy** of rmw_zenoh's shipped session config to
+`/tmp/zenoh_session_shm.json5` and points `ZENOH_SESSION_CONFIG_URI` at it. Never hand-write a
+minimal session config instead — that env var replaces the shipped default *wholesale*, which
+would drop rmw_zenoh's ROS defaults (peer mode, connect to `tcp/localhost:7447`). SHM engages
+per link, only where the subscriber's session also enables it and both containers share the
+host IPC namespace (`ipc: host`); anything unmet falls back to TCP loopback **silently** —
+verify by watching `lo` traffic, not config. The driver publishes the big `/<ns>/points`
+clouds, so this is the side where SHM pays off; size `shm_pool_mb` ≥ QoS depth × cloud size
+(256 recommended — the 48 MB default holds only ~8–16 expanded clouds). If
+`ZENOH_SESSION_CONFIG_URI` is already set, the entrypoint logs a "skipped" line and leaves it
+alone. Inert under Fast DDS.
+
 **Rig-less dev only:** with no rig to provide the router, the runtime image doubles as the router
 image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the driver's
 `os_driver` node, which is meaningless for a router and would leave the container permanently
