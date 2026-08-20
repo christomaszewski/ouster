@@ -35,21 +35,31 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
                                     # (unset -> follows lidar_frame; mismatch -> warn + lidar_frame)
   attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss
 
-# zenoh:                        # OPTIONAL — rmw_zenoh only (RMW_IMPLEMENTATION=rmw_zenoh_cpp);
-#                               # inert under the default Fast DDS. Same knob shape as the
-#                               # rig-infra ros2-bag-logger — keep the fleet's SHM knobs in sync.
-#   shared_memory: true         # opt this instance's zenoh session into shared memory. SHM is
-#                               # negotiated PER LINK: a subscriber uses it only if ITS session
-#                               # also enables SHM (the bag logger has the identical knob), both
-#                               # containers run ipc: host (this driver's compose does — the
-#                               # peer's must too), and every participant runs the same ROS
-#                               # distro's zenoh. ANYTHING unmet = silent per-link fallback to
-#                               # TCP loopback — no error, no log. Verify by watching `lo`
-#                               # traffic (the /<ns>/points bytes vanish when SHM engages), not
-#                               # by reading configs.
-#   shm_pool_mb: 256            # publisher-side SHM pool for the whole session. Size it >=
-#                               # subscriber QoS depth x expanded cloud size; rmw_zenoh's 48 MB
-#                               # default holds only ~8-16 big clouds. This driver PUBLISHES
-#                               # /<ns>/points, so 256 is the recommended floor here. Omit to
-#                               # keep the shipped default. Ignored (with a warning) unless
-#                               # shared_memory is true.
+# Zenoh session tweaks (rmw_zenoh only, RMW_IMPLEMENTATION=rmw_zenoh_cpp; inert under the default
+# Fast DDS). Same knob shape as the rig-infra ros2-bag-logger — keep the fleet's zenoh knobs in
+# sync. Rendered into one ZENOH_CONFIG_OVERRIDE export — rmw_zenoh applies the pairs ON TOP of
+# the session config it loads (its shipped ROS default, or your ZENOH_SESSION_CONFIG_URI file),
+# so untouched keys keep their ROS-tuned values. (Semantics change vs v0.1.2: the knob used to be
+# SKIPPED when the deployment set ZENOH_SESSION_CONFIG_URI; now the pairs apply on top of that
+# file too.) A bad key is a WARN in the driver log and ignored, so check `logs` after changes.
+# Shared memory ships DISABLED in rmw_zenoh and engages per link only where the SUBSCRIBER's
+# session also opted in (the bag logger has the identical knob) AND both containers share the
+# host IPC namespace (this driver's compose sets ipc: host; the subscriber's must too) — anything
+# unmet = silent per-link fallback to TCP loopback, so verify by watching `lo` traffic (the
+# /<ns>/points bytes vanish when SHM engages), not by reading configs. Keep every SHM participant
+# on the same distro's zenoh.
+# zenoh:
+#   shared_memory: true         # sugar for transport/shared_memory/enabled=true
+#   shm_pool_mb: 256            # sugar for …/transport_optimization/pool_size — sizes the SHM
+#                               # pool for what THIS session publishes, and the driver publishes
+#                               # the big /<ns>/points clouds, so this is where pool sizing
+#                               # matters: size it >= subscriber QoS depth x expanded cloud size
+#                               # (rmw default 48 MB holds only ~8-16 clouds; a full pool falls
+#                               # back to TCP per message). 256 is the recommended floor here;
+#                               # omit to keep the shipped default. Ignored (with a warning)
+#                               # unless shared_memory is true. Never set the ZENOH_SHM_ALLOC_SIZE
+#                               # env instead — it aliases the same key and silently overrides
+#                               # this knob.
+#   overrides:                  # any zenoh session-config subtree, flattened to leaf overrides
+#     transport:                # and applied LAST (wins over the sugar above on conflict)
+#       link: { tx: { batch_size: 16384 } }

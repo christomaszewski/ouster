@@ -28,13 +28,13 @@ services:
       # ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/192.168.1.1:7447"]' to reach a router
       # that is not on localhost. Empty = zenoh defaults. See docker/README.md.
       ZENOH_CONFIG_OVERRIDE: ${ZENOH_CONFIG_OVERRIDE:-}
-      # opt-in zenoh shared memory, launcher-derived from the config's `zenoh:` block (see the
-      # catalog entry in sensors/ouster.example.yaml). The entrypoint acts on these ONLY under
-      # rmw_zenoh_cpp (inert under Fast DDS, the default): it patches a COPY of rmw_zenoh's
-      # shipped session config inside the container and exports ZENOH_SESSION_CONFIG_URI at it —
-      # runtime-generated file, no host paths, so a baked deployment stays self-contained.
-      ZENOH_SHM_ENABLE: ${OUSTER_ZENOH_SHM_ENABLE:-0}
-      ZENOH_SHM_POOL_BYTES: ${OUSTER_ZENOH_SHM_POOL_BYTES:-0}
+      # launcher-rendered zenoh session override pairs from the config's `zenoh:` block (SHM
+      # sugar + generic overrides; see the catalog entry in sensors/ouster.example.yaml). The
+      # entrypoint appends them to ZENOH_CONFIG_OVERRIDE — AFTER any injected value above, so
+      # the config's pairs win on key conflict — ONLY under rmw_zenoh_cpp (inert under Fast
+      # DDS, the default). rmw_zenoh applies the pairs on top of whatever session config it
+      # loads, so this composes with a deployment-set ZENOH_SESSION_CONFIG_URI file too.
+      OUSTER_ZENOH_OVERRIDE: ${OUSTER_ZENOH_OVERRIDE:-}
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
     volumes:

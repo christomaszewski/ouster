@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sources the ROS environment and the workspace overlay (if present), applies the opt-in zenoh
-# shared-memory session config (rmw_zenoh only), then execs the given command. Used as the
+# Sources the ROS environment and the workspace overlay (if present), applies the launcher-
+# rendered zenoh session overrides (rmw_zenoh only), then execs the given command. Used as the
 # ENTRYPOINT for both Dockerfiles (runtime + dev).
 #
 # NOTE: ROS setup.bash scripts reference variables that may not be set yet
@@ -29,39 +29,17 @@ for overlay in \
   fi
 done
 
-# Opt-in zenoh shared memory (sensor config `zenoh:` block -> compose env ZENOH_SHM_ENABLE /
-# ZENOH_SHM_POOL_BYTES). rmw_zenoh ships SHM support compiled in but DISABLED, and the only
-# switch is a session config file: ZENOH_SESSION_CONFIG_URI REPLACES the shipped default
-# WHOLESALE, so we patch a COPY of the shipped file — never a hand-written minimal config, which
-# would drop rmw_zenoh's ROS defaults (peer mode, connect tcp/localhost:7447). SHM engages per
-# link only where the peer session ALSO enabled it and both containers share the host IPC
-# namespace (the deploy compose sets ipc: host); anything unmet falls back to TCP loopback
-# SILENTLY. The rmw_zenoh_cpp guard keeps the knob inert under Fast DDS (the default RMW).
-if [[ "${RMW_IMPLEMENTATION:-}" == "rmw_zenoh_cpp" && "${ZENOH_SHM_ENABLE:-0}" == "1" ]]; then
-  shipped="/opt/ros/${ROS_DISTRO}/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5"
-  patched="/tmp/zenoh_session_shm.json5"
-  if [[ -n "${ZENOH_SESSION_CONFIG_URI:-}" ]]; then
-    echo "ros-entrypoint: ZENOH_SESSION_CONFIG_URI already set (${ZENOH_SESSION_CONFIG_URI}); skipped the zenoh SHM patch" >&2
-  elif [[ ! -f "${shipped}" ]]; then
-    # [ -f ] guard: a non-zenoh image must not crash the entrypoint here under set -e
-    echo "ros-entrypoint: WARNING: ${shipped} not found; zenoh SHM NOT enabled" >&2
-  else
-    # first `enabled: false` inside the `shared_memory: {` block -> true; first `pool_size:`
-    # there -> ZENOH_SHM_POOL_BYTES (pool=0 = keep the shipped pool size)
-    awk -v pool="${ZENOH_SHM_POOL_BYTES:-0}" '
-      /shared_memory: \{/ && !d {s=1}
-      s && /enabled: false/ {sub(/enabled: false/, "enabled: true"); if (pool+0 == 0) {s=0; d=1}}
-      s && pool+0 > 0 && /pool_size:/ {sub(/pool_size: *[0-9]+/, "pool_size: " pool); s=0; d=1}
-      {print}' "${shipped}" > "${patched}"
-    if cmp -s "${shipped}" "${patched}"; then
-      # never half-enable: if the patch found nothing to change (upstream layout moved?), do NOT
-      # point the session at an unpatched copy as if SHM were on
-      echo "ros-entrypoint: WARNING: patching ${shipped} changed nothing; zenoh SHM NOT enabled" >&2
-    else
-      export ZENOH_SESSION_CONFIG_URI="${patched}"
-      echo "ros-entrypoint: zenoh SHM enabled via ${patched} (pool_size=${ZENOH_SHM_POOL_BYTES:-0} bytes; 0 = shipped default)" >&2
-    fi
-  fi
+# Opt-in zenoh session overrides (sensor config `zenoh:` block -> compose env
+# OUSTER_ZENOH_OVERRIDE, a launcher-rendered "path=json;..." pair string). rmw_zenoh applies
+# ZENOH_CONFIG_OVERRIDE pairs ON TOP of whatever session config it loads — its shipped ROS
+# default, or a deployment-set ZENOH_SESSION_CONFIG_URI file — so untouched keys keep their
+# loaded values. Appended AFTER any pre-existing container-level override: ours later = ours
+# wins on key conflict. A bad pair is a WARN in the driver log and ignored (it cannot hard-fail
+# the driver); the echo below is the field-debugging record of what actually applied. The
+# rmw_zenoh_cpp guard keeps the knob inert under Fast DDS (the default RMW).
+if [[ "${RMW_IMPLEMENTATION:-}" == "rmw_zenoh_cpp" && -n "${OUSTER_ZENOH_OVERRIDE:-}" ]]; then
+  export ZENOH_CONFIG_OVERRIDE="${ZENOH_CONFIG_OVERRIDE:+${ZENOH_CONFIG_OVERRIDE};}${OUSTER_ZENOH_OVERRIDE}"
+  echo "ros-entrypoint: ZENOH_CONFIG_OVERRIDE=${ZENOH_CONFIG_OVERRIDE}" >&2
 fi
 
 exec "$@"

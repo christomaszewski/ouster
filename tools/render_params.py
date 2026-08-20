@@ -16,8 +16,9 @@
 The sensor config is the single source of truth (uniform across all rig services). `driver_params`
 is OPAQUE -- copied verbatim into ros__parameters -- while the `connection` block is DERIVED onto
 upstream's flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). The
-optional `zenoh:` block never reaches the params doc: it is validated here and emitted as env
-tokens (`--env` mode) for the entrypoint's in-container SHM opt-in. Used by `ouster-up`:
+optional `zenoh:` block never reaches the params doc: it is validated here, rendered to ONE
+ZENOH_CONFIG_OVERRIDE pair string, and emitted (`--env` mode) for the entrypoint's in-container
+export. Used by `ouster-up`:
 
   render_params.py <config.yaml>          # -> the ROS 2 params YAML on stdout
   render_params.py --env <config.yaml>    # -> SERVICE/NAME/NAMESPACE/TYPE env lines
@@ -27,7 +28,9 @@ pushes via `ouster_ns`. (Upstream's own driver_params.yaml keys the explicit nod
 `ouster/os_driver`, which would NOT match a custom namespace -- so do NOT copy that keying.)
 Needs PyYAML on the host (apt: python3-yaml).
 """
+import json
 import re
+import shlex
 import sys
 
 try:
@@ -82,22 +85,27 @@ def derive_connection(connection: dict) -> dict:
 
 
 def derive_zenoh(zenoh) -> tuple:
-    """Validate the OPTIONAL top-level `zenoh:` block -> (shm_enable, shm_pool_bytes, warnings).
+    """Validate the OPTIONAL top-level `zenoh:` block -> (override_pairs, warnings).
 
     Fleet-uniform knob -- the rig-infra ros2-bag-logger takes the IDENTICAL block; keep the shape
-    in sync. `shared_memory: true` opts this instance's zenoh session into shared memory;
-    `shm_pool_mb` sizes the publisher-side SHM pool (absent -> 0 -> keep rmw_zenoh's shipped
-    default). Consumed by the image's entrypoint ONLY under rmw_zenoh_cpp -- inert under Fast DDS.
-    Unknown keys are a HARD error: unmet SHM preconditions fall back to TCP loopback silently, so
-    a typo here must not pass as "configured".
+    AND the flattening in sync with its tools/bag_cmd.py zenoh_env_lines(). Renders one
+    ZENOH_CONFIG_OVERRIDE "path=json;..." pair string ("" when the block sets nothing): rmw_zenoh
+    applies the pairs ON TOP of whatever session config it loads (its shipped ROS default, or a
+    deployment-set ZENOH_SESSION_CONFIG_URI file), so untouched keys keep their loaded values.
+    `shared_memory`/`shm_pool_mb` are sugar for the two SHM keys; `overrides` is any zenoh
+    session-config subtree, flattened to leaf pairs AFTER the sugar (later pairs win in
+    rmw_zenoh, so explicit overrides beat the sugar). Exported by the image's entrypoint ONLY
+    under rmw_zenoh_cpp -- inert under Fast DDS. Unknown keys are a HARD error: unmet SHM
+    preconditions fall back to TCP loopback silently, so a typo here must not pass as
+    "configured".
     """
     if not isinstance(zenoh, dict):
         sys.stderr.write("render_params: `zenoh:` must be a mapping\n")
         sys.exit(2)
-    unknown = sorted(set(zenoh) - {"shared_memory", "shm_pool_mb"})
+    unknown = sorted(set(zenoh) - {"shared_memory", "shm_pool_mb", "overrides"})
     if unknown:
         sys.stderr.write(f"render_params: unknown zenoh key(s): {', '.join(unknown)} "
-                         "(supported: shared_memory, shm_pool_mb)\n")
+                         "(supported: shared_memory, shm_pool_mb, overrides)\n")
         sys.exit(2)
     enable = zenoh.get("shared_memory", False)
     if not isinstance(enable, bool):
@@ -112,7 +120,32 @@ def derive_zenoh(zenoh) -> tuple:
     if pool_mb is not None and not enable:
         warns.append("zenoh.shm_pool_mb is ignored without zenoh.shared_memory: true")
         pool_mb = None
-    return enable, (pool_mb or 0) * 1024 * 1024, warns
+
+    pairs = []
+    if enable:
+        pairs.append(("transport/shared_memory/enabled", "true"))
+        if pool_mb:
+            pairs.append(("transport/shared_memory/transport_optimization/pool_size",
+                          str(pool_mb * 1024 * 1024)))
+    overrides = zenoh.get("overrides")
+    if overrides is not None and not isinstance(overrides, dict):
+        sys.stderr.write("render_params: zenoh.overrides must be a mapping "
+                         "(nested zenoh session config)\n")
+        sys.exit(2)
+    if overrides:
+        def leaves(prefix, val):
+            if isinstance(val, dict) and val:
+                for key in sorted(val):
+                    leaves(f"{prefix}/{key}" if prefix else str(key), val[key])
+            else:
+                pairs.append((prefix, json.dumps(val, sort_keys=True, separators=(",", ":"))))
+        leaves("", overrides)
+    for path, value in pairs:
+        if ";" in path or ";" in value:
+            sys.stderr.write(f"render_params: zenoh override at {path!r} contains ';' -- "
+                             "rmw_zenoh's ZENOH_CONFIG_OVERRIDE parser splits on ';'\n")
+            sys.exit(2)
+    return ";".join(f"{p}={v}" for p, v in pairs), warns
 
 
 def main() -> int:
@@ -132,15 +165,17 @@ def main() -> int:
     connection = cfg.get("connection") or {}
     ttype = str(connection.get("type") or "lidar")
     namespace = require_ident("ros.namespace", str((cfg.get("ros") or {}).get("namespace") or name))
-    shm_enable, shm_pool_bytes, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
+    zenoh_pairs, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
 
     if env_mode:
         # warn only where the knob is CONSUMED (params mode never reads `zenoh:`), so one
         # ouster-up run -- which invokes both modes -- surfaces each warning exactly once
         for warn in zenoh_warns:
             sys.stderr.write("render_params: " + warn + "\n")
+        # identity tokens are ident-safe by construction; the override pair string is NOT (JSON
+        # quotes/brackets/spaces), so shlex-quote it for the launcher's eval'd `export` block
         lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}", f"TYPE={ttype}",
-                 f"ZENOH_SHM_ENABLE={int(shm_enable)}", f"ZENOH_SHM_POOL_BYTES={shm_pool_bytes}"]
+                 "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs)]
         print("\n".join(lines))
         return 0
 

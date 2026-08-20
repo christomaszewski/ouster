@@ -31,7 +31,8 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-# config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE). Tokens, no spaces.
+# config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE; plain tokens) + the rendered
+# ZENOH_OVERRIDE pair string (shell-quoted by the renderer, safe for this eval).
 eval "$("$PYTHON" "$REPO/tools/render_params.py" --env "$CONFIG_ABS" | sed 's/^/export /')"
 PROJECT="${SERVICE}_${NAME}"
 
@@ -48,11 +49,11 @@ export OUSTER_PARAMS_HOST="$PARAMS_HOST"
 export OUSTER_NAMESPACE="$NAMESPACE"
 export OUSTER_NAME="$NAME"
 
-# Opt-in zenoh shared memory, derived from the config's `zenoh:` block (absent = 0/off; see the
-# catalog entry in sensors/ouster.example.yaml). Plain tokens, no host paths -> bake-safe. The
-# image's entrypoint acts on them ONLY under RMW_IMPLEMENTATION=rmw_zenoh_cpp (inert under Fast DDS).
-export OUSTER_ZENOH_SHM_ENABLE="$ZENOH_SHM_ENABLE"
-export OUSTER_ZENOH_SHM_POOL_BYTES="$ZENOH_SHM_POOL_BYTES"
+# Opt-in zenoh session overrides, derived from the config's `zenoh:` block (SHM sugar + generic
+# overrides; empty = no block; see the catalog entry in sensors/ouster.example.yaml). One rendered
+# ZENOH_CONFIG_OVERRIDE pair string, no host paths -> bake-safe. The image's entrypoint appends it
+# to ZENOH_CONFIG_OVERRIDE ONLY under RMW_IMPLEMENTATION=rmw_zenoh_cpp (inert under Fast DDS).
+export OUSTER_ZENOH_OVERRIDE="$ZENOH_OVERRIDE"
 
 FILES=(-f "$REPO/docker/compose/compose.deploy.yaml")
 
