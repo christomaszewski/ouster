@@ -2,7 +2,8 @@
 # Minimal production image for the upstream ouster-ros driver, VENDORED AT BUILD TIME. Self-contained
 # two-stage build: the build stage fetches the pinned upstream source with `vcs import` (from
 # ouster.repos) and compiles it (Release); the runtime stage ships only the install/ overlay on
-# ros-core, with exec-only deps resolved by rosdep (no hand-listed, version-fragile lib names).
+# BASE_IMAGE (default ros-core), with exec-only deps resolved by rosdep (no hand-listed,
+# version-fragile lib names).
 #
 #   docker build -f docker/Dockerfile.runtime -t ouster_driver:<tag> .
 # Cross-arch (Jetson/arm64): docker buildx build --platform linux/arm64 ... --load  — build on an
@@ -11,6 +12,14 @@
 # Layer caching: ouster.repos is COPYed alone before `vcs import`, so bumping the pin re-fetches +
 # rebuilds while the apt/rosdep layers stay cached when only the pin changed.
 ARG ROS_DISTRO=lyrical
+# Runtime parent. Under rig, tools/build_image.sh forwards RIG_BASE_IMAGE so the runtime stage
+# re-parents onto the deployment's one shared base (fleet-ros = ros-base + rmw-zenoh +
+# rosbag2/mcap): shared ros-* packages then come from literally the same layers as the
+# router/bag-logger, vehicle-side pull cost drops via layer sharing, and the explicit rmw installs
+# below become no-ops held at the parent's versions by the apt policy. Standalone builds keep the
+# slim ros-core parent. The ldd gate at the end of the runtime stage is the safety net for the
+# re-parent: every shipped ELF must still resolve, at image-build time.
+ARG BASE_IMAGE=ros:${ROS_DISTRO}-ros-core
 
 # ---- build stage ------------------------------------------------------------
 FROM ros:${ROS_DISTRO}-ros-base AS build
@@ -18,6 +27,11 @@ ARG ROS_DISTRO
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Stage-wide apt policy (see the runtime stage's copy for the full rationale): recommends off +
+# no upgrades past the parent image. The builder doesn't ship, but the .so's should compile
+# against the same ros-* versions the runtime stage holds, so the same parent-sync rule applies.
+RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::Upgrade "false";\n' \
+      > /etc/apt/apt.conf.d/99-rig-apt-policy
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git ca-certificates \
       python3-colcon-common-extensions python3-rosdep python3-vcstool \
@@ -56,19 +70,30 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
                    -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
 
 # ---- runtime stage ----------------------------------------------------------
-FROM ros:${ROS_DISTRO}-ros-core AS runtime
+FROM ${BASE_IMAGE} AS runtime
 ARG ROS_DISTRO
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Exec-only runtime deps, resolved by rosdep from the same package.xml manifests (so the list tracks
 # upstream automatically). Copy just the manifests, resolve, drop them.
-# Recommends off stage-wide — rosdep's apt calls don't pass --no-install-recommends themselves.
-RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\n' \
-      > /etc/apt/apt.conf.d/99-no-recommends
+# Stage-wide apt policy, written as apt.conf because rosdep's internal apt calls can't take
+# per-call flags:
+#   - recommends/suggests off (rosdep doesn't pass --no-install-recommends itself);
+#   - no upgrades past the parent image. The locally-pulled parent is the ros-* version authority,
+#     advanced deliberately via `rig build --no-cache` (=> docker build --pull) — the fleet
+#     convergence rule behind `rig image audit`'s cross-image agreement check: `apt-get install`
+#     of a package the parent already carries silently upgrades it to build-day candidates, so
+#     every uncached rebuild would race ahead of the parent and disagree with fleet images built
+#     on other dates. New packages still install normally; parent-carried ones stay at parent
+#     versions. Accepted residual: the dependency solver may still bump a parent package when a
+#     NEW package's constraint requires it (same doctrine as the other fleet repos).
+RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::Upgrade "false";\n' \
+      > /etc/apt/apt.conf.d/99-rig-apt-policy
 # Both RMWs are baked in; the deploy compose selects one per instance via RMW_IMPLEMENTATION
 # (default rmw_fastrtps_cpp). rmw_zenoh_cpp additionally needs a Zenoh router reachable on
-# localhost — see docker/README.md "RMW selection / Zenoh".
+# localhost — see docker/README.md "RMW selection / Zenoh". Under the fleet-ros parent both are
+# already present and the apt policy holds them at the parent's versions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-rosdep ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
   && rm -rf /var/lib/apt/lists/* \

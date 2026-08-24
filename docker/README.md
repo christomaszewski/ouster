@@ -6,7 +6,7 @@ Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this
 
 | Image | What | When |
 |---|---|---|
-| `Dockerfile.runtime` | Multi-stage. Fetches + builds the pinned upstream (Release), then ships only `install/` on `ros:lyrical-ros-core` with exec-only deps (resolved by rosdep). No compilers. | Production deploy + `rig`; CI builds it as the compile gate. |
+| `Dockerfile.runtime` | Multi-stage. Fetches + builds the pinned upstream (Release), then ships only `install/` on `BASE_IMAGE` (standalone default `ros:lyrical-ros-core`; under rig, the deployment's shared fleet-ros base) with exec-only deps (resolved by rosdep). No compilers. | Production deploy + `rig`; CI builds it as the compile gate. |
 | `Dockerfile.dev` | Full toolchain + vcstool + rosdep + rviz2 + rosbag2, non-root user matched to the host UID/GID. | Day-to-day dev + replay; also drives `.devcontainer.json`. |
 
 The runtime image resolves deps with `rosdep` (from the vendored `package.xml`) rather than a
@@ -31,6 +31,14 @@ docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .   # local bu
 # Jetson / arm64 (build on an arm64 host — qemu is painfully slow for the C++/PCL compile):
 docker buildx build --platform linux/arm64 -f docker/Dockerfile.runtime -t ouster_driver:jp7 .
 ```
+
+Under rig, `build_image.sh` follows the rig build-env contract: `RIG_BASE_IMAGE` re-parents the
+runtime stage onto the deployment's shared base (fleet-ros), `ROS_DISTRO` forwards the fleet
+distro, and `RIG_BUILD_NO_CACHE` maps to `--no-cache --pull` — the deliberate way the parent
+image (the fleet's ros-* version authority) advances. Both stages hold apt at the parent's
+package versions (`APT::Get::Upgrade "false"` in `/etc/apt/apt.conf.d/99-rig-apt-policy`), so
+uncached rebuilds can't drift past the parent and `rig image audit`'s cross-image agreement
+holds. See the header comments in `Dockerfile.runtime` and `tools/build_image.sh`.
 
 ## Dev container
 
