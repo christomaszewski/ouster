@@ -3,7 +3,9 @@
 # lives only in the build and in a gitignored src/ for local dev (`vcs import`). That keeps this
 # wrapper tiny and an upstream update down to a one-line bump here.
 #
-# `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. Upstream's
+# `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. A bump
+# here must also bump rigging.yaml `msgs.source.ref` (the fleet-ros-msgs overlay pin for
+# ouster_sensor_msgs — same repo), or bag-recorded schemas silently skew. Upstream's
 # ros2-branch releases are tagged plain `MAJOR.MINOR.PATCH` (newer scheme) and/or per-distro
 # (`kilted-0.14.2`, `rolling-0.14.2`, … all the same commit). Bump this to a newer release tag to
 # update; watch for a future `lyrical-*` tag. See README "Updating upstream".

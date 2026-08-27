@@ -84,10 +84,13 @@ router — that is rig-managed infrastructure the session connects out to (endpo
 ## Updating upstream
 
 1. Bump `version:` in [`ouster.repos`](ouster.repos) to a newer upstream release tag.
-2. Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
+2. Bump `msgs.source.ref` in [`rigging.yaml`](rigging.yaml) to the same value — it pins
+   `ouster_sensor_msgs` (same repo) for the deployment's fleet-ros-msgs overlay; a drifted pin
+   means silently skewed schemas in recorded bags.
+3. Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
    `docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .`).
-3. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
-4. Commit the `ouster.repos` change (e.g. `vendor ouster-ros 0.x.y`).
+4. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
+5. Commit both changes together (e.g. `vendor ouster-ros 0.x.y`).
 
 The only coupling to upstream is its launch CLI + param names. If `driver.launch.py` args
 (`params_file`, `ouster_ns`, `viz`) or `driver_params.yaml` keys are renamed, update
