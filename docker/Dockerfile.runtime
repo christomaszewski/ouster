@@ -150,15 +150,18 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
     fi \
  && rm -f /tmp/ldd_gaps
 # Context is the repo root (the build stage fetches sources itself), so entrypoints live under docker/.
+# statectl.sh implements the operational-state verbs (standby/activate/state) the launcher execs.
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh
+COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
+RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ENV OUSTER_DRIVER_WORKSPACE=/opt/ouster_driver
 # start-period covers sensor init + configure->activate (the lidar handshake is slower than an IMU);
-# timeout covers the ros2-CLI cold start the probe pays.
-HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
+# timeout covers the ros2-CLI cold start the probe pays, plus the sensor HTTP reachability
+# probe (5s cap) the standby case adds.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=60s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
 ENTRYPOINT ["/usr/local/bin/ros-entrypoint.sh"]
 # Bare-run default; the deploy compose overrides with params_file + ouster_ns. viz:=false so a bare
 # `docker run` never tries to start rviz in a headless container.

@@ -21,7 +21,7 @@ ZENOH_CONFIG_OVERRIDE pair string, and emitted (`--env` mode) for the entrypoint
 export. Used by `ouster-up`:
 
   render_params.py <config.yaml>          # -> the ROS 2 params YAML on stdout
-  render_params.py --env <config.yaml>    # -> SERVICE/NAME/NAMESPACE/TYPE env lines
+  render_params.py --env <config.yaml>    # -> SERVICE/NAME/NAMESPACE/TYPE/INITIAL_STATE env lines
 
 The params doc is keyed by the `/**` wildcard node so it binds regardless of the namespace rig
 pushes via `ouster_ns`. (Upstream's own driver_params.yaml keys the explicit node path
@@ -167,14 +167,26 @@ def main() -> int:
     namespace = require_ident("ros.namespace", str((cfg.get("ros") or {}).get("namespace") or name))
     zenoh_pairs, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
 
+    # Operational-state contract: the state `up` leaves the instance in. Absent = active
+    # (existing configs untouched); the launcher applies the RIG_TARGET_STATE > initial_state
+    # > active precedence. Hard error on anything else — a typo parking (or waking) a sensor
+    # must not pass silently.
+    initial_state = str(cfg.get("initial_state") or "active")
+    if initial_state not in ("standby", "active"):
+        sys.stderr.write(f"render_params: initial_state {initial_state!r} "
+                         "must be 'standby' or 'active'\n")
+        sys.exit(2)
+
     if env_mode:
         # warn only where the knob is CONSUMED (params mode never reads `zenoh:`), so one
         # ouster-up run -- which invokes both modes -- surfaces each warning exactly once
         for warn in zenoh_warns:
             sys.stderr.write("render_params: " + warn + "\n")
         # identity tokens are ident-safe by construction; the override pair string is NOT (JSON
-        # quotes/brackets/spaces), so shlex-quote it for the launcher's eval'd `export` block
+        # quotes/brackets/spaces), so shlex-quote it for the launcher's eval'd `export` block.
+        # INITIAL_STATE is always emitted (default included) so a stale env value can't leak in.
         lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}", f"TYPE={ttype}",
+                 f"INITIAL_STATE={initial_state}",
                  "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs)]
         print("\n".join(lines))
         return 0

@@ -151,6 +151,9 @@ generates one):
 ./ouster-up sensors/ouster_top.yaml status    # docker compose ps
 ./ouster-up sensors/ouster_top.yaml logs -f
 ./ouster-up sensors/ouster_top.yaml config    # render the merged compose (no run)
+./ouster-up sensors/ouster_top.yaml standby   # park: driver inactive + sensor STANDBY mode
+./ouster-up sensors/ouster_top.yaml activate  # wake: sensor NORMAL + driver active
+./ouster-up sensors/ouster_top.yaml state     # {"state": ...} JSON on stdout (read-only)
 ./ouster-up sensors/ouster_top.yaml down
 ```
 
@@ -160,7 +163,7 @@ Needs the Docker Compose v2 plugin and host PyYAML (`apt install python3-yaml`).
 
 | File | Role |
 |------|------|
-| `ouster-up` | Per-sensor launcher (verbs up/down/status/logs/config; forwards extra args to compose). |
+| `ouster-up` | Per-sensor launcher (verbs up/down/status/logs/config + standby/activate/state; forwards extra args to compose). |
 | `tools/render_params.py` | Generic config -> upstream ROS 2 params (`/**`-keyed); `--env` emits the instance identity. |
 | `tools/build_image.sh` | Build + push the runtime image: `build_image.sh <registry> [tag]` (rig's `build:` entrypoint). |
 | `sensors/ouster.example.yaml` | Example sensor config (copy + edit per instance; CI certifies against it). |

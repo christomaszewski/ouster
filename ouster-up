@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ouster-up <sensor-config.yaml> [up [-d] | down | status | logs [args] | config | ...]
+# ouster-up <sensor-config.yaml> [up [-d] | down | status | logs [args] | config | standby | activate | state | ...]
 #
 # Bring up ONE Ouster lidar from ONE generic rig config (the single source of truth). Reads the
 # config, derives the instance identity (ROS namespace /<name>; compose project = an inherited
@@ -13,6 +13,9 @@
 #   ouster-up sensors/ouster_top.yaml logs -f
 #   ouster-up sensors/ouster_top.yaml down
 #   ouster-up sensors/ouster_top.yaml config     # render the merged compose
+#   ouster-up sensors/ouster_top.yaml standby    # park: driver inactive + sensor STANDBY mode
+#   ouster-up sensors/ouster_top.yaml activate   # wake: sensor NORMAL + driver active
+#   ouster-up sensors/ouster_top.yaml state      # {"state": ...} JSON on stdout (read-only)
 #   ouster-up /any/host/path/ouster_top.yaml up -d   # config from anywhere (rig)
 #
 # Multiple sensors = run it per config; each is its own compose project + ROS namespace, so
@@ -21,7 +24,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${OUSTER_PYTHON:-python3}"
 
-CONFIG="${1:?usage: ouster-up <sensor-config.yaml> [up [-d]|down|status|logs|config|...]}"
+CONFIG="${1:?usage: ouster-up <sensor-config.yaml> [up [-d]|down|status|logs|config|standby|activate|state|...]}"
 shift || true
 [ -f "$CONFIG" ] || { echo "ouster-up: config not found: $CONFIG" >&2; exit 1; }
 CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
@@ -31,15 +34,29 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-# config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE; plain tokens) + the rendered
-# ZENOH_OVERRIDE pair string (shell-quoted by the renderer, safe for this eval).
+# config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE / INITIAL_STATE; plain tokens) +
+# the rendered ZENOH_OVERRIDE pair string (shell-quoted by the renderer, safe for this eval).
 eval "$("$PYTHON" "$REPO/tools/render_params.py" --env "$CONFIG_ABS" | sed 's/^/export /')"
 PROJECT="${SERVICE}_${NAME}"
 
-# Render the ROS 2 params file to a host staging path (one rendered file per instance).
-mkdir -p "$REPO/var/run"
+# Verbs: `status` -> `ps`; standby/activate/state are the operational-state contract (handled
+# below, NOT compose subcommands); everything else is forwarded to `docker compose` verbatim.
+# No args = up.
+ARGS=("$@")
+[ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
+[ "${ARGS[0]}" = "status" ] && ARGS=(ps "${ARGS[@]:1}")
+STATE_VERB=""
+case "${ARGS[0]}" in standby|activate|state) STATE_VERB="${ARGS[0]}";; esac
+
+# Render the ROS 2 params file to a host staging path (one rendered file per instance) — except
+# for the state verbs, which only exec into (or query) an EXISTING container: they need the env
+# values below for compose interpolation but never the file on disk, and `state` must stay
+# side-effect-free like `config`/`status` (certify-safe: no volume creates, no renders).
 PARAMS_HOST="$REPO/var/run/${NAME}.params.yaml"
-"$PYTHON" "$REPO/tools/render_params.py" "$CONFIG_ABS" > "$PARAMS_HOST"
+if [ -z "$STATE_VERB" ]; then
+  mkdir -p "$REPO/var/run"
+  "$PYTHON" "$REPO/tools/render_params.py" "$CONFIG_ABS" > "$PARAMS_HOST"
+fi
 
 # Compose env: this instance's params file, ROS namespace, and instance name (the metadata volume
 # is ouster_<name>_metadata). The deploy image is resolved by the compose file itself (OUSTER_IMAGE
@@ -57,21 +74,79 @@ export OUSTER_ZENOH_OVERRIDE="$ZENOH_OVERRIDE"
 
 FILES=(-f "$REPO/docker/compose/compose.deploy.yaml")
 
-# Verbs: `status` -> `ps`; everything else is forwarded to `docker compose` verbatim. No args = up.
-ARGS=("$@")
-[ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
-[ "${ARGS[0]}" = "status" ] && ARGS=(ps "${ARGS[@]:1}")
-
 # The driver persists sensor metadata to ~/.ros/{hostname}_metadata.json; compose mounts the
 # per-instance external volume ouster_<name>_metadata there (rig GCs it only on `rig down --purge`).
-# Ensure it exists before a bring-up — `config`/`down`/`status`/`logs` stay side-effect-free so
-# `rig certify` can render `config` under a poisoned env.
+# Ensure it exists before a bring-up — `config`/`down`/`status`/`logs` and the state verbs stay
+# side-effect-free so `rig certify` can render `config` under a poisoned env.
 [ "${ARGS[0]}" = "up" ] && docker volume create "ouster_${NAME}_metadata" >/dev/null
 
 # rig owns the compose project name (it exports COMPOSE_PROJECT_NAME per call); honor it when
 # inherited, fall back to <service>_<name> standalone. NEVER pass -p — overriding the orchestrator's
 # project name orphans the containers from `rig status`/`rig down`.
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT}"
+
+# --- operational-state verbs (rigging.yaml contract) -----------------------------------------
+# Implemented in the image (/usr/local/bin/statectl.sh) against the running container; the
+# launcher only answers the no-container cases compose exec cannot reach. Stdout discipline:
+# only `state` JSON on stdout, human lines on stderr.
+if [ -n "$STATE_VERB" ]; then
+  RUNNING="$(docker compose "${FILES[@]}" ps -q driver)" \
+    || { echo "ouster-up: cannot query compose project $COMPOSE_PROJECT_NAME" >&2; exit 1; }
+  if [ -z "$RUNNING" ]; then
+    if [ "$STATE_VERB" = "state" ]; then
+      ALL="$(docker compose "${FILES[@]}" ps -aq driver)" \
+        || { echo "ouster-up: cannot query compose project $COMPOSE_PROJECT_NAME" >&2; exit 1; }
+      DETAIL="no containers"
+      [ -n "$ALL" ] && DETAIL="container present but not running"
+      printf '{"state": "down", "detail": "%s"}\n' "$DETAIL"
+      exit 0
+    fi
+    echo "ouster-up: $STATE_VERB: project $COMPOSE_PROJECT_NAME is down (no running driver container) — transitions never create containers; run 'up' first" >&2
+    exit 1
+  fi
+  exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh "$STATE_VERB"
+fi
+
+# --- initial operational state (applies to `up` only) ----------------------------------------
+# Precedence: RIG_TARGET_STATE (rig-owned env token; "bring the whole vehicle up parked" beats
+# per-instance defaults) > config `initial_state` > active. Upstream's driver.launch.py always
+# auto-configures + auto-activates (no launch knob stops at `configured`), so standby-at-up is
+# up-then-transition: a brief active blip (seconds of data possible) before parking — see the
+# note in sensors/ouster.example.yaml.
+TARGET_STATE="${INITIAL_STATE}"
+if [ "${ARGS[0]}" = "up" ] && [ -n "${RIG_TARGET_STATE:-}" ]; then
+  case "$RIG_TARGET_STATE" in
+    standby|active) TARGET_STATE="$RIG_TARGET_STATE" ;;
+    *) echo "ouster-up: RIG_TARGET_STATE='$RIG_TARGET_STATE' must be 'standby' or 'active'" >&2; exit 1 ;;
+  esac
+fi
+
+if [ "${ARGS[0]}" = "up" ] && [ "$TARGET_STATE" = "standby" ]; then
+  DETACHED=""
+  for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
+  if [ -z "$DETACHED" ]; then
+    echo "ouster-up: initial state 'standby' needs a detached bring-up ('up -d') — the launcher must transition the instance after it settles" >&2
+    exit 1
+  fi
+  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=standby" >&2
+  docker compose "${FILES[@]}" "${ARGS[@]}"
+  # Wait out the auto-activate blip until the instance is SETTLED (active — or already standby
+  # on an idempotent re-up), then park it. Budget covers sensor init + configure->activate.
+  SETTLE_BUDGET="${OUSTER_STANDBY_SETTLE_TIMEOUT:-180}"
+  DEADLINE=$((SECONDS + SETTLE_BUDGET))
+  while :; do
+    STATE_JSON="$(docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh state 2>/dev/null)" || STATE_JSON=""
+    case "$STATE_JSON" in
+      *'"state": "active"'*|*'"state": "standby"'*) break ;;
+    esac
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "ouster-up: instance did not settle within ${SETTLE_BUDGET}s (last probe: ${STATE_JSON:-unreachable}) — left up; check 'status' / 'logs'" >&2
+      exit 1
+    fi
+    sleep 3
+  done
+  exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh standby
+fi
 
 echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

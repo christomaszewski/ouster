@@ -11,6 +11,19 @@
 service: ouster
 name: top                       # instance id -> ROS namespace /top; compose project ouster_top (standalone)
 
+# Operational state `up` leaves the instance in (omit = active; the rig-owned RIG_TARGET_STATE
+# env, set at `up`, overrides this). For THIS sensor, standby physically means: the driver's
+# os_driver lifecycle node parked at `inactive` (configured, metadata cached, not reading
+# packets) AND the sensor itself in its own STANDBY operating mode — motor stopped, laser off
+# (the big power/heat cut), UDP streaming stopped; its HTTP config API stays up, so health
+# still proves the sensor is reachable while parked. `activate` (or `ros2 lifecycle set` from a
+# mission layer plus a mode restore) wakes it: sensor back to NORMAL (re-init + spin-up, tens
+# of seconds) then lifecycle active. NOTE: upstream's driver.launch.py always auto-activates,
+# so `initial_state: standby` is up-then-park — expect a brief active blip (a few seconds of
+# data possible) before the instance settles into standby; it also requires a detached
+# bring-up (`up -d`).
+# initial_state: standby
+
 connection:
   type: lidar
   lidar:
@@ -34,6 +47,11 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
                                     # lidar_frame or sensor_frame, so rename it TOGETHER with them
                                     # (unset -> follows lidar_frame; mismatch -> warn + lidar_frame)
   attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss
+  # proc_mask: IMU|PCL|SCAN|IMG|RAW|TLM   # node default; which processors/topics run. TLM =
+  #                                       # ouster_sensor_msgs/Telemetry on /<ns>/telemetry
+  #                                       # (thermal-shutdown + shot-limiting status/countdowns,
+  #                                       # per lidar packet -> silent in standby). Drop tokens
+  #                                       # to trim topics/bandwidth; keep the default otherwise.
 
 # Zenoh session tweaks (rmw_zenoh only, RMW_IMPLEMENTATION=rmw_zenoh_cpp; inert under the default
 # Fast DDS). Same knob shape as the rig-infra ros2-bag-logger — keep the fleet's zenoh knobs in
