@@ -138,7 +138,7 @@ COPY --from=build /workspace/install /opt/ouster_driver
 COPY --from=build /opt/fleet-msgs/provenance.yaml /opt/fleet-msgs/provenance.yaml
 # Gate: every shipped ELF must resolve ALL its shared libs against exactly what this stage
 # installed (same env the entrypoint sets up). Catches upstream manifest gaps — like libzip at
-# 0.14.2 — at image-build time (CI) instead of as a dlopen failure on the vehicle.
+# 0.15.1 — at image-build time (CI) instead of as a dlopen failure on the vehicle.
 RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
  && source /opt/ouster_driver/setup.bash \
  && test -n "$(find /opt/ouster_driver -name '*.so' -print -quit)" \

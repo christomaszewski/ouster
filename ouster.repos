@@ -7,7 +7,7 @@
 # here must also bump rigging.yaml `msgs.source.ref` (the fleet-ros-msgs overlay pin for
 # ouster_sensor_msgs — same repo), or bag-recorded schemas silently skew. Upstream's
 # ros2-branch releases are tagged plain `MAJOR.MINOR.PATCH` (newer scheme) and/or per-distro
-# (`kilted-0.14.2`, `rolling-0.14.2`, … all the same commit). Bump this to a newer release tag to
+# (`kilted-0.15.1`, `rolling-0.15.1`, … all the same commit). Bump this to a newer release tag to
 # update; watch for a future `lyrical-*` tag. See README "Updating upstream".
 #
 # Move to a LAN mirror later with ONLY a `url` change (keep `version`). At this pin the Ouster SDK
@@ -18,4 +18,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/ouster-lidar/ouster-ros.git
-    version: 0.14.2          # latest stable release tag (commit b2e8cc6) on the ros2 lineage
+    version: 0.15.1          # latest stable release tag (commit 73cf036) on the ros2 lineage

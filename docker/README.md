@@ -18,7 +18,7 @@ runtime libs the binaries do link are derived from cv_bridge's own deb metadata 
 Optional SDK features (pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime
 correct and slim.
 Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at
-0.14.2 but declared build-only), [`runtime_extra_deps/package.xml`](runtime_extra_deps/package.xml)
+0.15.1 but declared build-only), [`runtime_extra_deps/package.xml`](runtime_extra_deps/package.xml)
 patches the gap through the same rosdep pass, and an `ldd` gate in `Dockerfile.runtime` fails the
 image build if any shipped binary still misses a shared library — so a future pin bump can't
 reintroduce this class of bug silently.
