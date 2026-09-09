@@ -10,8 +10,8 @@ verbs:
   logs: "logs"
   config: "config"
   # Operational-state contract (all three or none — declaring them IS the support claim). The
-  # launcher handles these itself (never compose subcommands): standby = driver lifecycle
-  # `inactive` + the sensor's own low-power STANDBY operating mode; activate reverses it;
+  # launcher handles these itself (never compose subcommands): standby = driver process
+  # stopped + physical STANDBY; activate wakes the sensor before launching the driver;
   # state prints {"state": active|standby|transitioning|down, "detail": ...} JSON on stdout.
   # `up` honors RIG_TARGET_STATE > config `initial_state` > active.
   standby: "standby"

@@ -197,6 +197,10 @@ def main() -> int:
     merged.update(derive_connection(connection))
     for key, value in (cfg.get("driver_params") or {}).items():
         merged[key] = value
+    if merged.get("operating_mode") not in (None, "", "NORMAL"):
+        sys.stderr.write("render_params: omit driver_params.operating_mode or use NORMAL; "
+                         "select standby with initial_state instead\n")
+        return 2
     doc = {"/**": {"ros__parameters": merged}}
     yaml.safe_dump(doc, sys.stdout, default_flow_style=False, sort_keys=False)
     return 0

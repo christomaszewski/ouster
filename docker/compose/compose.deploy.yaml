@@ -5,7 +5,7 @@
 # Multi-instance safe: NO container_name; identity comes from the compose project (the rig-injected
 # COMPOSE_PROJECT_NAME, or ouster_<name> standalone — the launcher handles both) and the ROS
 # namespace, so several lidars never collide. Health comes from the runtime image's baked
-# HEALTHCHECK (the os_driver lifecycle state).
+# HEALTHCHECK (the supervisor checks both sensor and driver state).
 services:
   driver:
     # Image precedence (Docker Compose interpolation): OUSTER_IMAGE (a full per-service override,
@@ -18,6 +18,8 @@ services:
                                 # SHM (zenoh.shared_memory) — SHM engages per link only between
                                 # sessions sharing the host IPC namespace; else silent TCP fallback
     restart: unless-stopped
+    init: true                 # reap descendants when the supervisor stops the launch process group
+    stop_grace_period: 45s
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       # both RMWs ship in the image; export RMW_IMPLEMENTATION=rmw_zenoh_cpp to switch. The
@@ -37,6 +39,7 @@ services:
       OUSTER_ZENOH_OVERRIDE: ${OUSTER_ZENOH_OVERRIDE:-}
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
+      OUSTER_TARGET_STATE: ${OUSTER_TARGET_STATE:-active}
     volumes:
       # the single rendered params file, read-only (a single-file mount; not nested in any :ro dir)
       - ${OUSTER_PARAMS_HOST}:/etc/ouster_driver/params.yaml:ro
@@ -45,14 +48,7 @@ services:
       # a static local alias for the per-instance external volume named below (compose does NOT
       # interpolate variables in a volume's map KEY — only in values such as `name:`).
       - metadata:/root/.ros
-    command:
-      - ros2
-      - launch
-      - ouster_ros
-      - driver.launch.py
-      - params_file:=/etc/ouster_driver/params.yaml
-      - ouster_ns:=${OUSTER_NAMESPACE}
-      - viz:=false              # never start rviz inside a headless deploy container
+    command: ["python3", "/usr/local/bin/operational_state.py", "serve"]
 
 # Per-instance metadata cache. external: true -> compose only USES it (ouster-up creates it on `up`,
 # rig GCs it on `rig down --purge`); the explicit name keeps it un-prefixed so rig can match it

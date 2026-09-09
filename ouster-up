@@ -13,8 +13,8 @@
 #   ouster-up sensors/ouster_top.yaml logs -f
 #   ouster-up sensors/ouster_top.yaml down
 #   ouster-up sensors/ouster_top.yaml config     # render the merged compose
-#   ouster-up sensors/ouster_top.yaml standby    # park: driver inactive + sensor STANDBY mode
-#   ouster-up sensors/ouster_top.yaml activate   # wake: sensor NORMAL + driver active
+#   ouster-up sensors/ouster_top.yaml standby    # park: driver stopped + sensor STANDBY mode
+#   ouster-up sensors/ouster_top.yaml activate   # wake: sensor NORMAL + start driver
 #   ouster-up sensors/ouster_top.yaml state      # {"state": ...} JSON on stdout (read-only)
 #   ouster-up /any/host/path/ouster_top.yaml up -d   # config from anywhere (rig)
 #
@@ -107,12 +107,8 @@ if [ -n "$STATE_VERB" ]; then
   exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh "$STATE_VERB"
 fi
 
-# --- initial operational state (applies to `up` only) ----------------------------------------
-# Precedence: RIG_TARGET_STATE (rig-owned env token; "bring the whole vehicle up parked" beats
-# per-instance defaults) > config `initial_state` > active. Upstream's driver.launch.py always
-# auto-configures + auto-activates (no launch knob stops at `configured`), so standby-at-up is
-# up-then-transition: a brief active blip (seconds of data possible) before parking — see the
-# note in sensors/ouster.example.yaml.
+# The supervisor receives the initial target BEFORE starting the upstream driver.
+# Standby startup never spins the sensor up just to park it again.
 TARGET_STATE="${INITIAL_STATE}"
 if [ "${ARGS[0]}" = "up" ] && [ -n "${RIG_TARGET_STATE:-}" ]; then
   case "$RIG_TARGET_STATE" in
@@ -120,33 +116,35 @@ if [ "${ARGS[0]}" = "up" ] && [ -n "${RIG_TARGET_STATE:-}" ]; then
     *) echo "ouster-up: RIG_TARGET_STATE='$RIG_TARGET_STATE' must be 'standby' or 'active'" >&2; exit 1 ;;
   esac
 fi
+export OUSTER_TARGET_STATE="$TARGET_STATE"
 
-if [ "${ARGS[0]}" = "up" ] && [ "$TARGET_STATE" = "standby" ]; then
-  DETACHED=""
-  for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
-  if [ -z "$DETACHED" ]; then
-    echo "ouster-up: initial state 'standby' needs a detached bring-up ('up -d') — the launcher must transition the instance after it settles" >&2
-    exit 1
-  fi
-  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=standby" >&2
+DETACHED=""
+for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
+if [ "${ARGS[0]}" = "up" ] && [ -n "$DETACHED" ]; then
+  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
   docker compose "${FILES[@]}" "${ARGS[@]}"
-  # Wait out the auto-activate blip until the instance is SETTLED (active — or already standby
-  # on an idempotent re-up), then park it. Budget covers sensor init + configure->activate.
-  SETTLE_BUDGET="${OUSTER_STANDBY_SETTLE_TIMEOUT:-180}"
+  # Also converge an existing container whose runtime target changed since its
+  # creation. The supervisor retains runtime requests across container restarts.
+  SETTLE_BUDGET="${OUSTER_SETTLE_TIMEOUT:-${OUSTER_STANDBY_SETTLE_TIMEOUT:-300}}"
   DEADLINE=$((SECONDS + SETTLE_BUDGET))
+  TARGET_VERB=activate
+  OTHER_TARGET=standby
+  [ "$TARGET_STATE" = standby ] && TARGET_VERB=standby
+  [ "$TARGET_STATE" = standby ] && OTHER_TARGET=active
   while :; do
     STATE_JSON="$(docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh state 2>/dev/null)" || STATE_JSON=""
     case "$STATE_JSON" in
-      *'"state": "active"'*|*'"state": "standby"'*) break ;;
+      *"\"state\": \"$TARGET_STATE\""*) exit 0 ;;
+      *'"state": "active"'*|*'"state": "standby"'*|*"target:$OTHER_TARGET;"*)
+        docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh "$TARGET_VERB" >&2 || true ;;
     esac
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-      echo "ouster-up: instance did not settle within ${SETTLE_BUDGET}s (last probe: ${STATE_JSON:-unreachable}) — left up; check 'status' / 'logs'" >&2
+      echo "ouster-up: instance did not reach $TARGET_STATE within ${SETTLE_BUDGET}s (last probe: ${STATE_JSON:-unreachable}) — left up; check 'status' / 'logs'" >&2
       exit 1
     fi
     sleep 3
   done
-  exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh standby
 fi
 
-echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST" >&2
+echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

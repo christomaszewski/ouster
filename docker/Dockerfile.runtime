@@ -108,7 +108,7 @@ RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::
 # localhost — see docker/README.md "RMW selection / Zenoh". Under the fleet-ros parent both are
 # already present and the apt policy holds them at the parent's versions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-rosdep ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
+      python3-rosdep python3-yaml ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
   && rm -rf /var/lib/apt/lists/* \
   && (rosdep init 2>/dev/null || true)
 COPY --from=build /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
@@ -154,15 +154,15 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
+COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ENV OUSTER_DRIVER_WORKSPACE=/opt/ouster_driver
-# start-period covers sensor init + configure->activate (the lidar handshake is slower than an IMU);
-# timeout covers the ros2-CLI cold start the probe pays, plus the sensor HTTP reachability
-# probe (5s cap) the standby case adds.
-HEALTHCHECK --interval=30s --timeout=20s --start-period=60s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
+# Allow the bounded wake-up + driver configure sequence during startup. Each
+# readiness probe checks physical sensor state and (when running) ROS lifecycle.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=240s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
 ENTRYPOINT ["/usr/local/bin/ros-entrypoint.sh"]
-# Bare-run default; the deploy compose overrides with params_file + ouster_ns. viz:=false so a bare
-# `docker run` never tries to start rviz in a headless container.
-CMD ["ros2", "launch", "ouster_ros", "driver.launch.py", "viz:=false"]
+# Bare runs must mount a params file at /etc/ouster_driver/params.yaml (or set
+# OUSTER_PARAMS_FILE). The supervisor starts the upstream headless launch after wake-up.
+CMD ["python3", "/usr/local/bin/operational_state.py", "serve"]

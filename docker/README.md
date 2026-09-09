@@ -114,7 +114,7 @@ aliases the pool-size key and rmw inserts it *after* `ZENOH_CONFIG_OVERRIDE`, si
 overriding the knob. Inert under Fast DDS.
 
 **Rig-less dev only:** with no rig to provide the router, the runtime image doubles as the router
-image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the driver's
+image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the supervisor's
 `os_driver` node, which is meaningless for a router and would leave the container permanently
 unhealthy):
 
@@ -151,7 +151,7 @@ generates one):
 ./ouster-up sensors/ouster_top.yaml status    # docker compose ps
 ./ouster-up sensors/ouster_top.yaml logs -f
 ./ouster-up sensors/ouster_top.yaml config    # render the merged compose (no run)
-./ouster-up sensors/ouster_top.yaml standby   # park: driver inactive + sensor STANDBY mode
+./ouster-up sensors/ouster_top.yaml standby   # park: driver stopped + sensor STANDBY mode
 ./ouster-up sensors/ouster_top.yaml activate  # wake: sensor NORMAL + driver active
 ./ouster-up sensors/ouster_top.yaml state     # {"state": ...} JSON on stdout (read-only)
 ./ouster-up sensors/ouster_top.yaml down
@@ -160,6 +160,12 @@ generates one):
 Each sensor becomes its own compose project (the rig-injected `COMPOSE_PROJECT_NAME`, or
 `ouster_<name>` standalone) under ROS namespace `/<name>`, so multiple instances never collide.
 Needs the Docker Compose v2 plugin and host PyYAML (`apt install python3-yaml`).
+
+The runtime supervisor keeps the container running in standby and stops the ROS driver
+process. Use the launcher state verbs rather than direct ROS lifecycle commands. Standby
+startup does not briefly wake the sensor. See the root README for state/restart semantics.
+Bare runtime `docker run` invocations must use `--init` and mount the sensor params file at
+`/etc/ouster_driver/params.yaml`; compose supplies both automatically.
 
 | File | Role |
 |------|------|

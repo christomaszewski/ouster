@@ -9,7 +9,7 @@ targeting **ROS 2 Lyrical** and the in-house **rig** orchestrator.
 Unlike the `sbg`/`vectornav` drivers in this workspace (which reimplement their devices in-house),
 this repo **wraps the official Ouster driver unmodified** so upstream releases can be pulled in with
 a one-line version bump. We add **no C++ of our own** — only the rig-integration shell: a launcher,
-a params mapper, Docker, compose, and the `rig` descriptor.
+a params mapper, a Python operational-state supervisor, Docker, compose, and the `rig` descriptor.
 
 ## How it works
 
@@ -17,15 +17,15 @@ a params mapper, Docker, compose, and the `rig` descriptor.
 |-------|------|
 | `ouster.repos` | Pins the upstream `ouster-ros` release. Fetched with `vcs import` at image-build time — nothing upstream is committed here, so the repo stays tiny. |
 | `tools/render_params.py` | Maps a generic rig sensor config (`connection` + `driver_params`) → upstream's `driver_params.yaml` keys. Keyed by the `/**` wildcard so it binds at any namespace. |
-| `docker/compose/compose.deploy.yaml` | Runs upstream's own launch: `ros2 launch ouster_ros driver.launch.py params_file:=… ouster_ns:=… viz:=false`. |
+| `docker/compose/compose.deploy.yaml` | Runs the supervisor, which starts upstream's unmodified headless launch only after the sensor is running. |
+| `docker/entrypoints/operational_state.py` | Serializes mode changes, owns the driver process group, and reconciles the requested state after failures. |
 | `ouster-up` | The rig launcher contract (`up`/`down`/`status`/`logs`/`config`, plus the operational-state verbs `standby`/`activate`/`state`) over one sensor config. |
 | `rigging.yaml` | Tells `rig` how to drive `ouster-up` (verbs, build, host ports, metadata volume). |
 
-Upstream `os_driver` is a single `rclcpp_lifecycle` node; `driver.launch.py` auto-transitions it
-configure → activate. The container healthcheck reports healthy while `/<ns>/os_driver` is
-**settled in `active` or `inactive` (standby) and ready to run** — in standby it additionally
-probes the sensor's HTTP API, so a parked vehicle still surfaces a dead sensor. It never
-measures data flow: a healthy standby instance produces nothing by design.
+Upstream `os_driver` is a single `rclcpp_lifecycle` node. The supervisor wakes the sensor
+before launching it, and stops the entire driver process group before parking the sensor.
+The container stays running in both states. Health requires agreement between the requested
+state, sensor operating mode/status, and driver state; it does not measure data flow.
 
 ## Layout
 
@@ -42,6 +42,7 @@ ouster/
 │   ├── Dockerfile.runtime    # multi-stage: vcs import + rosdep + colcon (Release)
 │   ├── Dockerfile.dev
 │   ├── entrypoints/{ros-entrypoint,healthcheck,statectl}.sh
+│   ├── entrypoints/{operational_state,sensor_http}.py
 │   └── compose/{compose.deploy,compose.dev,compose.replay}.yaml
 └── src/                      # GITIGNORED — upstream fetched here by `vcs import` / the build
 ```
@@ -97,42 +98,57 @@ fleet bag logger can record it as-is. Two limits to know:
 
 ## Operational states (`standby` / `activate` / `state`)
 
-Beyond up/down, a running instance has two operational states, transitioned at runtime without
-touching containers (the rig operational-state contract; declared in `rigging.yaml`):
+A running container has two operational states, managed through the launcher:
 
 ```bash
-./ouster-up sensors/ouster_top.yaml standby    # park it
-./ouster-up sensors/ouster_top.yaml state      # -> {"state": "standby", "detail": "lifecycle:inactive"}
-./ouster-up sensors/ouster_top.yaml activate   # wake it
+./ouster-up sensors/ouster_top.yaml standby
+./ouster-up sensors/ouster_top.yaml state
+# {"state": "standby", "detail": "target:standby; lifecycle:absent; sensor:STANDBY/STANDBY"}
+./ouster-up sensors/ouster_top.yaml activate
 ```
 
-- **`standby`** — the `os_driver` lifecycle node is deactivated to `inactive` (configured,
-  metadata cached, not reading packets) **and** the sensor itself is put into its own `STANDBY`
-  operating mode over its HTTP config API: motor stopped, laser off — the real power/heat win —
-  UDP streaming stopped, HTTP API still answering. Both steps are needed because upstream's
-  `on_deactivate` only stops the packet-reading thread; it leaves the sensor spinning.
-- **`activate`** — restores `NORMAL` operating mode first and waits for the sensor to report
-  `RUNNING` (re-init + spin-up, tens of seconds), then activates the lifecycle node. The
-  driver's own init_id-change detection then performs one clean self-reset that refreshes
-  metadata; `state` may briefly report `transitioning` while it runs.
-- **`state`** — read-only probe: machine JSON on stdout (`active` | `standby` | `transitioning`
-  | `down`; raw lifecycle state in `detail`), human chatter on stderr. Side-effect-free like
-  `config`/`status`.
-- Both transitions are idempotent (repeat = no-op success) and never create or destroy
-  containers — on a down project they fail with a clear error (`state` reports `down`).
+- **`standby`** stops and reaps the upstream launch process group, then applies the sensor's
+  `STANDBY` mode and waits for physical standby. The motor and laser stop. The container and
+  control socket remain available, but **the ROS driver node and its services are absent**.
+  Stopping the driver also stops queued reconnect/reset operations from waking the sensor.
+- **`activate`** applies `NORMAL` and waits for sensor status `RUNNING` before starting the
+  driver. Driver configuration then fetches fresh metadata; activation never depends on a
+  ROS service responding while the sensor is asleep. Completion requires lifecycle `active`
+  and a sensor reporting `NORMAL/RUNNING`.
+- **`state`** prints machine JSON on stdout (`active` | `standby` | `transitioning` | `down`).
+  Its detail includes the target, lifecycle state, and sensor mode/status. A mismatch or
+  unreachable sensor is `transitioning` and unhealthy, including after a partial failure.
+- Requests are serialized and idempotent. If another transition remains busy for 20 seconds,
+  the command fails with an explicit retry message. A failed accepted request retains its
+  target; the supervisor retries recovery every five seconds. The healthcheck and `state`
+  are read-only. Sensor mode writes never intentionally persist config to flash.
 
-**Initial state:** a top-level `initial_state: standby | active` key in the sensor config
-(absent = `active`) selects the state `up` leaves the instance in; the rig-owned
-`RIG_TARGET_STATE` env, when set at `up`, overrides it ("bring the whole vehicle up parked"),
-so precedence is `RIG_TARGET_STATE` > `initial_state` > `active`. Upstream's launch always
-auto-activates, so `initial_state: standby` is up-then-park: expect a brief active blip, and use
-a detached bring-up (`up -d`). Try it standalone:
-`RIG_TARGET_STATE=standby ./ouster-up sensors/ouster_top.yaml up -d`.
+Firmware below 3.1 (including 2.4) uses the legacy config commands followed by `reinitialize`;
+newer firmware uses explicit nonpersistent staging. Temporary HTTP failures during spin-up
+are retried within the deadline. The supervisor supports the metadata endpoints in FW 2.3+.
+Keep `driver_params.operating_mode` omitted or `NORMAL`; use `initial_state` to request standby.
+Leave upstream `persist_config` false if the sensor should retain its existing boot defaults.
 
-Mission-layer software may also drive the node's ROS 2 lifecycle services directly (`standby` =
-lifecycle `inactive`, `active` = `active`) without the launcher in the loop — that is expected;
-just pair it with the sensor operating-mode restore the way `statectl.sh` does, or the sensor
-stays in `STANDBY` and produces nothing.
+**Initial state:** `RIG_TARGET_STATE` > top-level `initial_state` > `active` selects the target
+for a new container. Standby startup does not launch the driver or briefly wake the sensor.
+Both foreground `up` and `up -d` support standby. Detached `up -d` additionally waits for the
+requested state, including when reusing an existing container. Its default budget is 300 seconds
+(`OUSTER_SETTLE_TIMEOUT`; the older `OUSTER_STANDBY_SETTLE_TIMEOUT` also remains accepted).
+
+Runtime requests are saved in `/var/lib/ouster/target-state` inside the container, so a Docker
+restart retains the latest request. Recreating the container uses the configured initial state.
+Foreground `up` attached to an existing container preserves its runtime target; use `activate`,
+`standby`, or detached `up -d` to change it. A sensor power cycle while parked is detected and
+the sensor is parked again when reachable.
+
+Mission software must use the rig/launcher operational-state verbs. Direct ROS lifecycle changes
+are not persistent operational-state requests: the supervisor will reconcile them to its target.
+Only one service instance should own a physical sensor's configuration.
+
+Regression tests run with `python3 -m unittest discover -s tests -v`. Before field deployment,
+validate on the OS1-64/FW 2.4: boot with persisted standby, activate, repeat standby/activate,
+restart the container while parked, and power-cycle the sensor while parked. Check both reported
+state and sensor status; mock tests do not replace this hardware check.
 
 The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
 `RMW_IMPLEMENTATION=rmw_zenoh_cpp` before `ouster-up` to switch. The driver never runs the Zenoh
