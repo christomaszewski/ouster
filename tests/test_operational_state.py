@@ -60,10 +60,13 @@ class Firmware:
         self.status_failures = 0
         self.lose_reinit_response = False
         self.never_runs = False
+        self.telemetry = {"internal_temperature_deg_c": 45}
 
     def __call__(self, request, timeout=None):
         path = urllib.parse.urlsplit(request.full_url)
         self.calls.append((request.get_method(), path.path, path.query))
+        if path.path.endswith("/telemetry"):
+            return HTTPResponse(self.telemetry)
         if path.path.endswith("/metadata/sensor_info"):
             if self.status_failures and self.active["operating_mode"] == "NORMAL":
                 self.status_failures -= 1

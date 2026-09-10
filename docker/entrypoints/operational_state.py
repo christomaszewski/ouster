@@ -21,6 +21,7 @@ import time
 import yaml
 
 from sensor_http import SensorHTTP
+from temperature import temperature_monitor
 
 LOG = logging.getLogger("ouster-state")
 SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
@@ -218,7 +219,7 @@ class Handler(socketserver.StreamRequestHandler):
             pass
 
 
-def load_hostname(params_file):
+def load_sensor_params(params_file):
     with open(params_file) as stream:
         document = yaml.safe_load(stream) or {}
     for node in document.values():
@@ -226,16 +227,18 @@ def load_hostname(params_file):
         if params.get("operating_mode") not in (None, "", "NORMAL"):
             raise ValueError("driver_params.operating_mode must be omitted or NORMAL; use initial_state instead")
         if params.get("sensor_hostname"):
-            return str(params["sensor_hostname"])
+            return params
     raise ValueError(f"no sensor_hostname in {params_file}")
 
 
-def serve():
+def serve(*, monitor=temperature_monitor):
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
-    driver = Driver(PARAMS_FILE, os.environ.get("OUSTER_NAMESPACE", "ouster"))
-    controller = Controller(SensorHTTP(load_hostname(PARAMS_FILE)), driver,
+    namespace = os.environ.get("OUSTER_NAMESPACE", "ouster")
+    params = load_sensor_params(PARAMS_FILE)
+    driver = Driver(PARAMS_FILE, namespace)
+    controller = Controller(SensorHTTP(str(params["sensor_hostname"])), driver,
                             os.environ.get("OUSTER_TARGET_STATE", "active"), TARGET_FILE,
                             stop_event=stop_event)
     controller.sensor.sleep = controller.pause
@@ -250,12 +253,14 @@ def serve():
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                while not stop_event.is_set():
-                    try:
-                        controller.transition()
-                    except Exception as error:
-                        LOG.warning("%s", error)
-                    stop_event.wait(5)
+                with monitor(controller.sensor, namespace, params.get("sensor_frame", "os_sensor"),
+                             stop_event, controller.changing):
+                    while not stop_event.is_set():
+                        try:
+                            controller.transition()
+                        except Exception as error:
+                            LOG.warning("%s", error)
+                        stop_event.wait(5)
             finally:
                 server.shutdown()
                 # A client handler may still own the transition. Interruptible
@@ -280,7 +285,7 @@ def client(command, *, output=True):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="ouster-state: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
     command = sys.argv[1] if len(sys.argv) == 2 else ""
     try:
         if command == "serve":

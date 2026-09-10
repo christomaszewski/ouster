@@ -1,6 +1,7 @@
 """Firmware-aware, non-persistent sensor mode changes (FW 2.3+)."""
 
 import json
+import math
 import re
 import time
 import urllib.error
@@ -52,6 +53,18 @@ class SensorHTTP:
         if config.get("operating_mode") not in ("NORMAL", "STANDBY"):
             raise SensorError("sensor active config has no valid operating_mode")
         return info, config
+
+    def temperature(self):
+        """Read internal temperature in Celsius; older hardware may omit it."""
+        telemetry = json.loads(self.request("/telemetry", timeout=2))
+        if not isinstance(telemetry, dict):
+            raise SensorError("invalid sensor telemetry response")
+        value = telemetry.get("internal_temperature_deg_c")
+        if value is None:
+            raise SensorError("internal temperature unavailable (requires Rev 06 or newer hardware)")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise SensorError("invalid internal_temperature_deg_c in sensor telemetry")
+        return float(value)
 
     def read_until(self, deadline):
         while self.clock() < deadline:

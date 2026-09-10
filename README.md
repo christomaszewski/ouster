@@ -79,22 +79,37 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   `point_type`, `sensor_frame`/`lidar_frame`/`imu_frame`, `attempt_reconnect`, …). Do **not** put
   connection keys here — they come from the `connection` block.
 
-### Thermal / telemetry status
+### Temperature and thermal status
+
+The wrapper publishes **`/<ns>/temperature`** as `sensor_msgs/msg/Temperature` from the
+`/<ns>/sensor_temperature` node. It reads `internal_temperature_deg_c` with a read-only
+`GET /api/v1/sensor/telemetry` about every **5 seconds**, in both active and standby states.
+It pauses polling during mode transitions and resumes afterward, independently of the
+driver's `proc_mask`.
+
+- `temperature`: internal sensor temperature in **degrees Celsius**.
+- `header.frame_id`: `driver_params.sensor_frame` (upstream default: `os_sensor`).
+- `header.stamp`: host receipt time; the sensor's FPGA timestamp is not assumed to be Unix time.
+- `variance`: `0.0`, meaning unknown. QoS is reliable, volatile, depth 1.
+
+```bash
+ros2 topic echo /top/temperature sensor_msgs/msg/Temperature
+```
+
+**Hardware limit:** the [FW 2.4 manual, §13.4.3 (p. 126)](https://data.ouster.io/downloads/software-user-manual/firmware-user-manual-v2.4.0.pdf)
+documents internal temperature for **Rev 06 and newer** sensors only. A Rev 4/5 OS1 therefore
+cannot be assumed to provide readings. Missing/null/invalid values or HTTP failures skip the
+sample and log a warning at most once per minute; polling continues without affecting the
+operational state. No zero or previous reading is substituted. `sensor_msgs` is a standard ROS
+interface, so recording this topic needs no additional fleet message package.
 
 The driver publishes `ouster_sensor_msgs/msg/Telemetry` on **`/<ns>/telemetry`**:
 thermal-shutdown and shot-limiting status plus their countdowns, stamped from every lidar
 packet's header (packet rate — ~640 msgs/s at 1024x10). It is **on by default** via the `TLM`
 token in the `proc_mask` driver param (node default `IMU|PCL|SCAN|IMG|RAW|TLM`; drop `TLM` to
 disable). `ouster_sensor_msgs` is already pinned in `rigging.yaml`'s `msgs:` block, so the
-fleet bag logger can record it as-is. Two limits to know:
-
-- It is derived from lidar packets, so it goes **silent in standby** — parked-vehicle health
-  is the healthcheck's sensor HTTP probe, not this topic.
-- It carries status, **not temperatures**. Actual readings (input voltage/current, and on
-  newer FW/revisions `internal_temperature_deg_c`) live on the sensor's HTTP API
-  (`GET /api/v1/sensor/telemetry`, FW ≥ 2.4; field availability varies by hardware revision).
-  Publishing those for dashboards belongs to the fleet diagnostics layer, not this wrapper
-  (no bespoke status topics here — see the operational-state contract).
+fleet bag logger can record it as-is. This topic carries thermal status flags, not temperature
+measurements, and goes **silent in standby** because it is derived from lidar packets.
 
 ## Operational states (`standby` / `activate` / `state`)
 

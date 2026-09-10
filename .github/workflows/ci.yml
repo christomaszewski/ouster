@@ -38,11 +38,18 @@ jobs:
           context: .
           file: docker/Dockerfile.runtime
           push: false
-          load: false
+          load: true
+          tags: ouster_driver:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             ROS_DISTRO=${{ env.ROS_DISTRO }}
+      - name: Test packaged supervisor and ROS temperature topic
+        run: |
+          docker run --rm --init --network none \
+            -e OUSTER_TEST_ENTRYPOINT_DIR=/usr/local/bin \
+            -v "$PWD:/workspace:ro" -w /workspace ouster_driver:ci \
+            python3 -m unittest discover -s tests -v
 
   # ---------------------------------------------------------------------------
   # rig launcher contract, executable (see rigging.yaml). `rig certify` runs

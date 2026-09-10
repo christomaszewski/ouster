@@ -36,6 +36,8 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
   udp_profile_lidar: RNG19_RFL8_SIG16_NIR16
   point_type: original
   sensor_frame: ouster_sensor   # upstream defaults are os_sensor / os_lidar / os_imu
+                               # also used by /<ns>/temperature (Celsius, every 5s when available;
+                               # HTTP telemetry requires Rev 06+ for temperature, including standby)
   lidar_frame: ouster_lidar
   imu_frame: ouster_imu
   point_cloud_frame: ouster_lidar   # frame clouds/scans are stamped in; must EQUAL the value of

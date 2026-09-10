@@ -113,7 +113,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && (rosdep init 2>/dev/null || true)
 COPY --from=build /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
 COPY --from=build /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/deps/ouster_sensor_msgs/package.xml
-# Patch upstream manifest gaps (exec deps that are linked but not declared — see the file's header):
+# Wrapper deps and upstream manifest gaps (see the file's header):
 # rides the same rosdep pass as the upstream manifests, so nothing is hand-pinned to a soname.
 COPY docker/runtime_extra_deps/package.xml /tmp/deps/ouster_wrapper_runtime_deps/package.xml
 # pcl_conversions and cv_bridge are skipped: the driver uses both HEADER-ONLY — the shipped .so's
@@ -154,7 +154,7 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
-COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py /usr/local/bin/
+COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/temperature.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8

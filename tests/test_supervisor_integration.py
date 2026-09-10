@@ -1,6 +1,7 @@
-"""Real HTTP/socket/subprocess integration; no ROS installation or hardware."""
+"""Real HTTP/socket/process integration, plus ROS temperature when installed."""
 
 import http.server
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,8 @@ from unittest.mock import patch
 
 from test_operational_state import Firmware, ROOT
 import operational_state as operational
+
+HAS_ROS = importlib.util.find_spec("rclpy") is not None
 
 
 class Request:
@@ -42,6 +45,8 @@ class HTTPHandler(http.server.BaseHTTPRequestHandler):
 
 class IntegrationTests(unittest.TestCase):
     def test_park_wake_restart_and_sensor_power_cycle(self):
+        if os.environ.get("OUSTER_TEST_ENTRYPOINT_DIR"):
+            self.assertTrue(HAS_ROS, "packaged runtime must include rclpy for temperature publishing")
         with tempfile.TemporaryDirectory(prefix="ouster-e2e-", dir="/tmp") as td:
             root = Path(td)
             firmware = Firmware("v2.4.0")
@@ -71,20 +76,30 @@ while True:
 ''')
                 ros.chmod(0o755)
                 params = root / "params.yaml"
-                params.write_text(f"/**:\n  ros__parameters:\n    sensor_hostname: 127.0.0.1:{sensor.server_port}\n")
+                params.write_text(f"/**:\n  ros__parameters:\n    sensor_hostname: 127.0.0.1:{sensor.server_port}\n"
+                                  "    sensor_frame: test_sensor_frame\n")
                 starts = root / "starts"
                 socket_path = str(root / "state.sock")
                 env = dict(os.environ, PATH=str(bin_dir) + ":" + os.environ['PATH'],
                            OUSTER_PARAMS_FILE=str(params), OUSTER_STATE_SOCKET=socket_path,
                            OUSTER_TARGET_FILE=str(root / "target"), OUSTER_TARGET_STATE="standby",
+                           OUSTER_NAMESPACE="test_ouster",
                            FAKE_DRIVER_STARTS=str(starts), FAKE_SENSOR=f"http://127.0.0.1:{sensor.server_port}")
                 log = (root / "supervisor.log").open("w+")
                 process = None
                 entrypoints = Path(os.environ.get("OUSTER_TEST_ENTRYPOINT_DIR", ROOT / "docker/entrypoints"))
 
                 def start():
-                    return subprocess.Popen([sys.executable, str(entrypoints / "operational_state.py"), "serve"],
-                                            env=env, stdout=log, stderr=log)
+                    command = [sys.executable, str(entrypoints / "operational_state.py"), "serve"]
+                    if not HAS_ROS:
+                        # Exercise the same supervisor without the ROS adapter on
+                        # bare CI/host Python. Runtime-image CI uses real rclpy.
+                        command = [sys.executable, "-c",
+                                   "import sys; from contextlib import nullcontext; "
+                                   "sys.path.insert(0, sys.argv[1]); import operational_state; "
+                                   "operational_state.serve(monitor=lambda *_: nullcontext())",
+                                   str(entrypoints)]
+                    return subprocess.Popen(command, env=env, stdout=log, stderr=log)
 
                 def wait_state(expected):
                     deadline = time.monotonic() + 15
@@ -100,10 +115,44 @@ while True:
                         time.sleep(0.1)
                     self.fail(f"did not reach {expected}: {last}")
 
+                listener = context = executor = None
+                readings = []
+                if HAS_ROS:
+                    import rclpy
+                    from rclpy.context import Context
+                    from rclpy.executors import SingleThreadedExecutor
+                    from rclpy.signals import SignalHandlerOptions
+                    from sensor_msgs.msg import Temperature
+                    context = Context()
+                    rclpy.init(args=[], context=context, signal_handler_options=SignalHandlerOptions.NO)
+                    listener = rclpy.create_node("temperature_test", context=context)
+                    listener.create_subscription(Temperature, "/test_ouster/temperature", readings.append, 1)
+                    executor = SingleThreadedExecutor(context=context)
+                    executor.add_node(listener)
+
+                def wait_temperature(value):
+                    if listener is None:
+                        return
+                    readings.clear()
+                    with sensor.lock:
+                        firmware.telemetry["internal_temperature_deg_c"] = value
+                    deadline = time.monotonic() + 12
+                    while time.monotonic() < deadline:
+                        executor.spin_once(timeout_sec=0.1)
+                        if readings and readings[-1].temperature == value:
+                            message = readings[-1]
+                            self.assertEqual(message.header.frame_id, "test_sensor_frame")
+                            self.assertEqual(message.variance, 0.0)
+                            stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
+                            self.assertLess(abs(time.time() - stamp), 3, "stamp must be host receipt time")
+                            return
+                    self.fail(f"no temperature {value}; received: {readings}")
+
                 try:
                     with patch.object(operational, "SOCKET", socket_path):
                         process = start()
                         wait_state("standby")
+                        wait_temperature(45.0)
                         self.assertFalse(starts.exists(), "standby boot launched the driver")
                         health = subprocess.run([str(entrypoints / "healthcheck.sh")], env=env,
                                                 capture_output=True, text=True, timeout=20)
@@ -113,11 +162,13 @@ while True:
                                                capture_output=True, text=True, timeout=20)
                         self.assertEqual(state.returncode, 0, state.stderr)
                         self.assertEqual(json.loads(state.stdout)["state"], "standby")
-                        for _ in range(2):
+                        for cycle in range(2):
                             operational.client("activate")
                             wait_state("active")
+                            wait_temperature(46.5 + cycle)
                             operational.client("standby")
                             wait_state("standby")
+                            wait_temperature(40.5 + cycle)
                         time.sleep(0.5)
                         self.assertEqual(firmware.active["operating_mode"], "STANDBY")
                         self.assertEqual(len(starts.read_text().splitlines()), 2)
@@ -129,6 +180,7 @@ while True:
                         env["OUSTER_TARGET_STATE"] = "active"
                         process = start()
                         wait_state("standby")
+                        wait_temperature(39.0)
                         self.assertEqual(len(starts.read_text().splitlines()), 2)
 
                         # Simulate power-up from a different persisted mode.
@@ -154,6 +206,10 @@ while True:
                     sensor.shutdown()
                     http_thread.join()
                     log.close()
+                    if listener is not None:
+                        executor.shutdown()
+                        listener.destroy_node()
+                        context.try_shutdown()
 
 
 if __name__ == "__main__":
