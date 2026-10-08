@@ -5,7 +5,7 @@ service: ouster
 launcher: ouster-up
 verbs:
   up: "up -d"
-  down: "down"
+  down: "down"     # supervisor parks on SIGTERM according to config shutdown_state
   status: "ps"       # rig may append `--format json` to parse `docker compose ps`
   logs: "logs"
   config: "config"

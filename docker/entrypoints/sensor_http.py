@@ -66,20 +66,42 @@ class SensorHTTP:
             raise SensorError("invalid internal_temperature_deg_c in sensor telemetry")
         return float(value)
 
-    def read_until(self, deadline):
+    @staticmethod
+    def check_cancelled(stop_event):
+        if stop_event is not None and stop_event.is_set():
+            raise SensorError("sensor transition cancelled: supervisor stopping")
+
+    def pause(self, seconds, stop_event):
+        if stop_event is None:
+            self.sleep(seconds)
+        elif stop_event.wait(seconds):
+            self.check_cancelled(stop_event)
+
+    def read_until(self, deadline, stop_event=None):
         while self.clock() < deadline:
+            self.check_cancelled(stop_event)
             try:
                 return self.snapshot(timeout=max(0.1, min(3, (deadline - self.clock()) / 2)))
             except Exception as error:
                 if not self.transient(error):
                     raise
-                self.sleep(min(2, max(0, deadline - self.clock())))
+                self.pause(min(2, max(0, deadline - self.clock())), stop_event)
         raise SensorError("timed out reading sensor status/config")
 
-    def ensure_mode(self, target):
+    def ensure_mode(self, target, *, timeout=None, stop_event=None):
         expected = {"NORMAL": "RUNNING", "STANDBY": "STANDBY"}[target]
-        deadline = self.clock() + (120 if target == "NORMAL" else 60)
-        info, config = self.read_until(deadline)
+        deadline = self.clock() + (timeout if timeout is not None else
+                                   (120 if target == "NORMAL" else 60))
+
+        def write(path, body=None):
+            self.check_cancelled(stop_event)
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise SensorError(f"timed out configuring sensor {target}")
+            return self.request(path, body, timeout=min(5, remaining))
+
+        info, config = self.read_until(deadline, stop_event)
+        self.check_cancelled(stop_event)
         if config["operating_mode"] != target:
             # Reset staging from active config, so applying our mode cannot also
             # apply unrelated values left staged by another client.
@@ -89,16 +111,16 @@ class SensorHTTP:
             legacy = self.version(info) < (3, 1, 0)
             if legacy:
                 value = urllib.parse.quote(json.dumps(config), safe="")
-                reply = self.request(f"/cmd/set_config_param?args=.+{value}")
+                reply = write(f"/cmd/set_config_param?args=.+{value}")
                 if json.loads(reply) != "set_config_param":
                     raise SensorError(f"sensor rejected staged config: {reply}")
             else:
-                self.request("/config?staging=true&reinit=false&persist=false", config)
+                write("/config?staging=true&reinit=false&persist=false", config)
             try:
                 if legacy:
-                    self.request("/cmd/reinitialize")
+                    write("/cmd/reinitialize")
                 else:
-                    self.request("/config?staging=true&reinit=true&persist=false", {})
+                    write("/config?staging=true&reinit=true&persist=false", {})
             except Exception as error:
                 # A lost reinit response is ambiguous. Observe the result; do
                 # not repeatedly reinitialize a sensor that is spinning up.
@@ -106,11 +128,11 @@ class SensorHTTP:
                     raise
 
         while self.clock() < deadline:
-            info, config = self.read_until(deadline)
+            info, config = self.read_until(deadline, stop_event)
             status = info.get("status", "unknown")
             if config["operating_mode"] == target and status == expected:
                 return
             if status == "ERROR":
                 raise SensorError("sensor reports ERROR")
-            self.sleep(min(2, max(0, deadline - self.clock())))
+            self.pause(min(2, max(0, deadline - self.clock())), stop_event)
         raise SensorError(f"timed out waiting for sensor {target}/{expected}")

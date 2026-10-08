@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import socketserver
@@ -47,8 +48,15 @@ class Driver:
                 ["ros2", "lifecycle", "get", self.node], capture_output=True,
                 text=True, timeout=5, check=True,
             )
-            return result.stdout.split()[0]
-        except (subprocess.SubprocessError, IndexError):
+            # Zenoh can emit ANSI-colored watchdog warnings on stdout before or after
+            # the CLI response. Only accept the lifecycle response's complete line.
+            output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+            for line in output.splitlines():
+                match = re.fullmatch(r"([a-z][a-z0-9_]*)\s+\[\d+\]", line.strip())
+                if match:
+                    return match.group(1)
+            return "unreachable"
+        except subprocess.SubprocessError:
             return "unreachable"
 
     def start(self):
@@ -59,6 +67,21 @@ class Driver:
     def stop(self):
         if self.process is None:
             return
+        # Drain both the UDP reader (deactivate) and scan-processing thread
+        # (cleanup) while the ROS context is still usable. SIGINT alone closes
+        # Zenoh before these threads finish publishing and can abort os_driver.
+        if self.running():
+            try:
+                state = self.lifecycle()
+                transitions = {"active": ("deactivate", "cleanup"),
+                               "inactive": ("cleanup",)}.get(state, ())
+                for transition in transitions:
+                    subprocess.run(
+                        ["ros2", "lifecycle", "set", self.node, transition],
+                        capture_output=True, text=True, timeout=5, check=True,
+                    )
+            except (OSError, subprocess.SubprocessError) as error:
+                LOG.warning("driver lifecycle cleanup unavailable; stopping process group: %s", error)
         # Kill/wait for the entire launch process group, even if its leader has
         # already exited. No upstream config writer may survive into standby.
         pgid = self.process.pid
@@ -137,6 +160,8 @@ class Controller:
         return result
 
     def reconcile(self):
+        if self.stop_event.is_set():
+            raise RuntimeError("supervisor stopping")
         try:
             if self.observe()["state"] == self.target:
                 return
@@ -148,8 +173,10 @@ class Controller:
             raise RuntimeError("supervisor stopping")
         mode = "NORMAL" if self.target == "active" else "STANDBY"
         LOG.info("waiting for sensor %s", mode)
-        self.sensor.ensure_mode(mode)
+        self.sensor.ensure_mode(mode, stop_event=self.stop_event)
         if self.target == "active":
+            if self.stop_event.is_set():
+                raise RuntimeError("supervisor stopping")
             self.driver.start()
             deadline = self.clock() + 90
             try:
@@ -181,6 +208,8 @@ class Controller:
         if not self.lock.acquire(timeout=20 if target is not None else 0):
             raise RuntimeError("transition in progress; retry when state settles")
         try:
+            if self.stop_event.is_set():
+                raise RuntimeError("supervisor stopping")
             if target is not None:
                 self.save_target(target)
             self.reconcile()
@@ -190,6 +219,36 @@ class Controller:
             raise
         finally:
             self.changing.clear()
+            self.lock.release()
+
+    def shutdown(self, target):
+        """Stop all config writers, then park without changing the restart target."""
+        if target not in ("standby", "unchanged"):
+            raise ValueError("shutdown state must be standby or unchanged")
+        self.stop_event.set()
+        self.changing.set()
+        # Leave margin inside Compose's 120-second stop grace period. An
+        # interrupted transition can still be reaping the driver process group.
+        deadline = self.clock() + 100
+        if not self.lock.acquire(timeout=55):
+            raise RuntimeError("shutdown could not acquire transition lock; sensor state unconfirmed")
+        try:
+            self.driver.stop()
+            if target == "standby":
+                remaining = min(60, deadline - self.clock())
+                if remaining <= 0:
+                    raise RuntimeError("shutdown timed out before parking sensor")
+                LOG.info("shutdown: waiting for sensor STANDBY")
+                # This final transition must run despite stop_event. It neither
+                # starts the driver nor persists a new target or sensor config.
+                self.sensor.ensure_mode("STANDBY", timeout=remaining)
+                LOG.info("shutdown complete: sensor STANDBY; restart target:%s", self.target)
+            else:
+                LOG.info("shutdown complete: sensor mode unchanged; restart target:%s", self.target)
+        except Exception:
+            LOG.error("shutdown failed; sensor standby is NOT confirmed")
+            raise
+        finally:
             self.lock.release()
 
 
@@ -236,12 +295,14 @@ def serve(*, monitor=temperature_monitor):
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
     namespace = os.environ.get("OUSTER_NAMESPACE", "ouster")
+    shutdown_state = os.environ.get("OUSTER_SHUTDOWN_STATE", "standby")
+    if shutdown_state not in ("standby", "unchanged"):
+        raise ValueError("OUSTER_SHUTDOWN_STATE must be standby or unchanged")
     params = load_sensor_params(PARAMS_FILE)
     driver = Driver(PARAMS_FILE, namespace)
     controller = Controller(SensorHTTP(str(params["sensor_hostname"])), driver,
                             os.environ.get("OUSTER_TARGET_STATE", "active"), TARGET_FILE,
                             stop_event=stop_event)
-    controller.sensor.sleep = controller.pause
     path = Path(SOCKET)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("w") as owner:
@@ -252,22 +313,37 @@ def serve(*, monitor=temperature_monitor):
             server.controller = controller
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
+            shutdown_started = False
+
+            def shutdown():
+                nonlocal shutdown_started
+                if shutdown_started:
+                    return
+                shutdown_started = True
+                stop_event.set()
+                server.shutdown()
+                thread.join()
+                controller.shutdown(shutdown_state)
+
             try:
                 with monitor(controller.sensor, namespace, params.get("sensor_frame", "os_sensor"),
                              stop_event, controller.changing):
-                    while not stop_event.is_set():
-                        try:
-                            controller.transition()
-                        except Exception as error:
-                            LOG.warning("%s", error)
-                        stop_event.wait(5)
+                    try:
+                        while not stop_event.is_set():
+                            try:
+                                controller.transition()
+                            except Exception as error:
+                                LOG.warning("%s", error)
+                            stop_event.wait(5)
+                    finally:
+                        # Park before closing the temperature ROS context too.
+                        shutdown()
             finally:
-                server.shutdown()
-                # A client handler may still own the transition. Interruptible
-                # sensor waits let it unwind before we stop the driver.
-                with controller.lock:
-                    driver.stop()
-                path.unlink(missing_ok=True)
+                try:
+                    # Also park if initializing the optional ROS monitor fails.
+                    shutdown()
+                finally:
+                    path.unlink(missing_ok=True)
 
 
 def client(command, *, output=True):

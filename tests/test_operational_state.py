@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -60,6 +61,7 @@ class Firmware:
         self.status_failures = 0
         self.lose_reinit_response = False
         self.never_runs = False
+        self.initializing_modes = {"NORMAL", "STANDBY"}
         self.telemetry = {"internal_temperature_deg_c": 45}
 
     def __call__(self, request, timeout=None):
@@ -73,7 +75,8 @@ class Firmware:
                 raise urllib.error.HTTPError(request.full_url, 503, "initializing", {}, None)
             status = "RUNNING" if self.active["operating_mode"] == "NORMAL" else "STANDBY"
             return HTTPResponse({"build_rev": self.version,
-                                 "status": "INITIALIZING" if self.never_runs else status})
+                                 "status": "INITIALIZING" if self.never_runs and
+                                 self.active["operating_mode"] in self.initializing_modes else status})
         if path.path.endswith("/cmd/get_config_param"):
             return HTTPResponse(self.active)
         if path.path.endswith("/cmd/set_config_param"):
@@ -151,6 +154,47 @@ class SensorTests(unittest.TestCase):
             self.run_mode(reject)
         self.assertEqual(caught.exception.code, 400)
 
+    def test_shutdown_has_a_bounded_sensor_wait(self):
+        clock = FakeClock()
+        firmware = Firmware("v2.4.0")
+        firmware.never_runs = True
+        sensor = SensorHTTP("sensor", clock=clock, sleep=clock.sleep)
+        with patch("urllib.request.urlopen", side_effect=firmware), \
+                self.assertRaisesRegex(SensorError, "timed out"):
+            sensor.ensure_mode("STANDBY", timeout=7)
+        self.assertEqual(clock.now, 7)
+
+    def test_shutdown_during_status_read_prevents_wakeup_write(self):
+        stop = threading.Event()
+        firmware = Firmware("v2.4.0")
+
+        def read_then_stop(request, timeout=None):
+            response = firmware(request, timeout)
+            if "/cmd/get_config_param" in request.full_url:
+                stop.set()
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=read_then_stop), \
+                self.assertRaisesRegex(SensorError, "cancelled"):
+            SensorHTTP("sensor").ensure_mode("NORMAL", stop_event=stop)
+        self.assertEqual(firmware.active["operating_mode"], "STANDBY")
+        self.assertFalse(any("set_config" in path or "reinitialize" in path
+                             for _, path, _ in firmware.calls))
+
+    def test_shutdown_cancels_sensor_wait_promptly(self):
+        stop = threading.Event()
+        firmware = Firmware("v2.4.0")
+        firmware.never_runs = True
+
+        def stop_during_wait(seconds):
+            stop.set()
+            return True
+
+        with patch("urllib.request.urlopen", side_effect=firmware), \
+                patch.object(stop, "wait", side_effect=stop_during_wait), \
+                self.assertRaisesRegex(SensorError, "cancelled"):
+            SensorHTTP("sensor").ensure_mode("NORMAL", stop_event=stop)
+
 
 class FakeDriver:
     def __init__(self, events):
@@ -189,7 +233,7 @@ class FakeSensor:
             raise OSError("sensor disconnected")
         return {"status": self.status}, {"operating_mode": self.mode}
 
-    def ensure_mode(self, mode):
+    def ensure_mode(self, mode, **_):
         self.events.append("sensor:" + mode)
         if self.fail:
             raise OSError("sensor disconnected")
@@ -269,7 +313,7 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(self.controller.state()["state"], "standby")
 
     def test_final_sensor_mismatch_cannot_report_success(self):
-        def ineffective_mode(_):
+        def ineffective_mode(_, **kwargs):
             self.sensor.mode, self.sensor.status = "NORMAL", "RUNNING"
         self.sensor.mode, self.sensor.status = "NORMAL", "RUNNING"
         self.sensor.ensure_mode = ineffective_mode
@@ -281,6 +325,70 @@ class ControllerTests(unittest.TestCase):
         self.events.clear()
         self.controller.transition("active")
         self.assertEqual(self.events, [])
+
+    def test_shutdown_parks_after_stopping_and_preserves_restart_target(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.controller.shutdown("standby")
+        self.assertEqual(self.events, ["driver:stop", "sensor:STANDBY"])
+        self.assertEqual(self.target_file.read_text().strip(), "active")
+        restarted = operational.Controller(self.sensor, self.driver, "standby", self.target_file)
+        restarted.transition()
+        self.assertEqual(restarted.state()["state"], "active")
+
+    def test_shutdown_unchanged_does_not_write_sensor(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.controller.shutdown("unchanged")
+        self.assertEqual(self.events, ["driver:stop"])
+        self.assertEqual(self.sensor.mode, "NORMAL")
+
+    def test_shutdown_does_not_claim_standby_if_sensor_is_unreachable(self):
+        self.controller.transition("active")
+        self.sensor.fail = True
+        with self.assertLogs("ouster-state", "ERROR") as logs, \
+                self.assertRaisesRegex(OSError, "disconnected"):
+            self.controller.shutdown("standby")
+        self.assertIn("NOT confirmed", logs.output[0])
+        self.assertEqual(self.target_file.read_text().strip(), "active")
+
+    def test_unstoppable_driver_prevents_shutdown_sensor_write(self):
+        self.driver.process = object()
+        self.driver.stop_fails = True
+        with self.assertLogs("ouster-state", "ERROR"), \
+                self.assertRaisesRegex(RuntimeError, "would not stop"):
+            self.controller.shutdown("standby")
+        self.assertEqual(self.events, ["driver:stop"])
+
+    def test_commands_after_shutdown_cannot_save_or_wake(self):
+        self.controller.transition("standby")
+        self.controller.shutdown("standby")
+        self.events.clear()
+        with self.assertRaisesRegex(RuntimeError, "stopping"):
+            self.controller.transition("active")
+        self.assertEqual(self.target_file.read_text().strip(), "standby")
+        self.assertEqual(self.events, [])
+
+    def test_command_waiting_on_lock_cannot_restart_after_shutdown(self):
+        self.controller.transition("standby")
+        self.controller.lock.acquire()
+        errors = []
+
+        def activate():
+            try:
+                self.controller.transition("active")
+            except RuntimeError as error:
+                errors.append(str(error))
+
+        worker = threading.Thread(target=activate)
+        worker.start()
+        self.controller.stop_event.set()
+        self.controller.lock.release()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ["supervisor stopping"])
+        self.assertEqual(self.target_file.read_text().strip(), "standby")
+        self.assertNotIn("driver:start", self.events)
 
     def test_socket_commands_and_health(self):
         path = str(Path(self.temp.name) / "state.sock")
@@ -303,6 +411,66 @@ class ControllerTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_stop_drains_reader_and_scan_threads_before_signalling(self):
+        from unittest.mock import Mock
+        driver = operational.Driver("unused", "/test")
+        driver.process = Mock(pid=123)
+        calls = []
+
+        def signal_finished_group(*_):
+            calls.append("signal")
+            raise ProcessLookupError
+
+        with patch.object(driver, "running", return_value=True), \
+                patch.object(driver, "lifecycle", return_value="active"), \
+                patch.object(operational.subprocess, "run",
+                             side_effect=lambda cmd, **_: calls.append(cmd[-1])), \
+                patch.object(operational.os, "killpg", side_effect=signal_finished_group):
+            driver.stop()
+        self.assertEqual(calls, ["deactivate", "cleanup", "signal"])
+        self.assertIsNone(driver.process)
+
+    def test_failed_lifecycle_cleanup_still_stops_process_group(self):
+        from unittest.mock import Mock
+        driver = operational.Driver("unused", "/test")
+        driver.process = Mock(pid=123)
+        with patch.object(driver, "running", return_value=True), \
+                patch.object(driver, "lifecycle", return_value="active"), \
+                patch.object(operational.subprocess, "run", side_effect=
+                             subprocess.TimeoutExpired("ros2", 5)), \
+                patch.object(operational.os, "killpg", side_effect=ProcessLookupError()) as kill, \
+                self.assertLogs("ouster-state", "WARNING"):
+            driver.stop()
+        kill.assert_called_once_with(123, signal.SIGINT)
+        self.assertIsNone(driver.process)
+
+    def test_lifecycle_ignores_zenoh_warnings_on_stdout(self):
+        driver = operational.Driver("unused", "/test")
+        warning = '\x1b[2m2026-10-07T18:25:19Z\x1b[0m WARN Watchdog: priority denied\n'
+        for output, expected in (
+            ("active [3]\n", "active"),
+            (warning + "active [3]\n", "active"),
+            ("active [3]\n" + warning, "active"),
+            (warning + "\x1b[32minactive [2]\x1b[0m\n", "inactive"),
+            (warning + "unknown [0]\n", "unknown"),
+            (warning + "active: waiting for response\n", "unreachable"),
+            ("", "unreachable"),
+        ):
+            with self.subTest(output=output), patch.object(driver, "running", return_value=True), \
+                    patch.object(operational.subprocess, "run", return_value=
+                                 subprocess.CompletedProcess([], 0, stdout=output)):
+                self.assertEqual(driver.lifecycle(), expected)
+
+    def test_lifecycle_failed_probe_cannot_report_active(self):
+        driver = operational.Driver("unused", "/test")
+        for error in (
+            subprocess.CalledProcessError(1, "ros2", output="active [3]\n"),
+            subprocess.TimeoutExpired("ros2", 5, output="active [3]\n"),
+        ):
+            with self.subTest(error=error), patch.object(driver, "running", return_value=True), \
+                    patch.object(operational.subprocess, "run", side_effect=error):
+                self.assertEqual(driver.lifecycle(), "unreachable")
+
     def test_stopping_driver_terminates_its_child_process_group(self):
         driver = operational.Driver("unused", "/test")
         # No ROS or hardware. Exercise real process-group ownership and cleanup.

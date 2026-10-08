@@ -16,6 +16,8 @@ a params mapper, a Python operational-state supervisor, Docker, compose, and the
 | Piece | Role |
 |-------|------|
 | `ouster.repos` | Pins the upstream `ouster-ros` release. Fetched with `vcs import` at image-build time — nothing upstream is committed here, so the repo stays tiny. |
+| `ouster-sdk.repos` | Pins the ROS-compatible SDK fork containing the legacy IMU bounds fix. |
+| `tools/fetch_upstream.py` | Fetches both pins into a fresh checkout, replaces the bundled SDK, and records their actual revisions. |
 | `tools/render_params.py` | Maps a generic rig sensor config (`connection` + `driver_params`) → upstream's `driver_params.yaml` keys. Keyed by the `/**` wildcard so it binds at any namespace. |
 | `docker/compose/compose.deploy.yaml` | Runs the supervisor, which starts upstream's unmodified headless launch only after the sensor is running. |
 | `docker/entrypoints/operational_state.py` | Serializes mode changes, owns the driver process group, and reconciles the requested state after failures. |
@@ -32,6 +34,7 @@ state, sensor operating mode/status, and driver state; it does not measure data 
 ```
 ouster/
 ├── ouster.repos              # upstream pin (vcstool)
+├── ouster-sdk.repos          # explicit SDK override (full commit SHA)
 ├── rigging.yaml              # rig descriptor
 ├── ouster-up                 # rig launcher (networked; no serial branch)
 ├── sensors/ouster.example.yaml
@@ -50,13 +53,13 @@ ouster/
 ## Quick start (local dev, no rig)
 
 ```bash
-# vendor upstream into src/ (gitignored; needs vcstool — apt install python3-vcstool):
-mkdir -p src && vcs import src < ouster.repos
-git -C src/ouster-ros submodule update --init --recursive 2>/dev/null || true   # some pins use one
+# fetch the ROS driver and patched SDK (needs python3-vcstool and python3-yaml):
+python3 tools/fetch_upstream.py src
 
 # colcon build (needs a ROS 2 lyrical env; first time: rosdep install --from-paths src --ignore-src -y):
 colcon build --base-paths src --merge-install \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+    -DCMAKE_PROJECT_ouster_ros_INCLUDE="$PWD/docker/ament_target_dependencies_compat.cmake"
 
 #   …or skip the local toolchain and build the deployable image instead:
 docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .
@@ -78,6 +81,8 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   `config/driver_params.yaml` works (`lidar_mode`, `timestamp_mode`, `udp_profile_lidar`,
   `point_type`, `sensor_frame`/`lidar_frame`/`imu_frame`, `attempt_reconnect`, …). Do **not** put
   connection keys here — they come from the `connection` block.
+- `shutdown_state: standby` (default) — physically park on container shutdown;
+  `unchanged` stops the driver without changing the sensor's operating mode.
 
 ### Temperature and thermal status
 
@@ -156,6 +161,33 @@ Foreground `up` attached to an existing container preserves its runtime target; 
 `standby`, or detached `up -d` to change it. A sensor power cycle while parked is detected and
 the sensor is parked again when reachable.
 
+**Shutdown state:** top-level `shutdown_state: standby` parks the physical sensor when
+`rig down`, launcher `down`, Docker stop/restart, or foreground Ctrl-C stops the container.
+The supervisor first requests lifecycle `deactivate` and `cleanup`, which drain upstream's
+UDP and scan-processing threads before ROS/Zenoh closes. It then stops and reaps the entire
+driver process group, applies nonpersistent STANDBY, and waits for the sensor to confirm it.
+If ROS is unreachable, bounded signal escalation still stops the process group before the
+sensor mode changes. Compose allows 120 seconds for shutdown, including up to 60 seconds
+waiting for standby. The launcher stops the container first, checks its exit status, and
+prints the last 40 log lines if shutdown failed, before removing it. A failed park or forced
+kill therefore makes `rig down` return nonzero. Direct `docker compose down` bypasses that
+exit-status check; its success alone does not prove sensor standby.
+
+Use `shutdown_state: unchanged` to stop the driver while leaving the sensor mode alone.
+The shutdown policy is captured when the container is created; recreate it after changing
+that YAML setting. Shutdown parking does **not** overwrite the saved runtime target, so a
+restart of an active container wakes it again. A new container follows `initial_state` as
+before. Firmware boot defaults are not written to flash. SIGKILL, host power loss, or a
+disconnected sensor cannot guarantee standby. `rig down` stops Ouster before its Zenoh
+router in the supplied deployment; keep that ordering for graceful ROS cleanup.
+
+Rendered params use content-based filenames under `var/run/`. Changing driver or connection
+parameters changes the bind-mount path, so the next `up` recreates the container and reloads
+both driver and supervisor configuration. Old files are retained for existing containers.
+`status`, `logs`, state verbs, and `down` never write those files; failed validation cannot
+truncate a live container's params. `config` also stages validated params so `rig bake` can
+capture the file bind, without changing the contents mounted by an existing container.
+
 Mission software must use the rig/launcher operational-state verbs. Direct ROS lifecycle changes
 are not persistent operational-state requests: the supervisor will reconcile them to its target.
 Only one service instance should own a physical sensor's configuration.
@@ -181,7 +213,21 @@ router — that is rig-managed infrastructure the session connects out to (endpo
 4. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
 5. Commit both changes together (e.g. `vendor ouster-ros 0.x.y`).
 
-The only coupling to upstream is its launch CLI + param names. If `driver.launch.py` args
+The SDK is independently pinned in [`ouster-sdk.repos`](ouster-sdk.repos). Our fork starts at
+upstream `sdk-0.16.2/ouster-ros-0.15.0` and backports the legacy IMU bounds correction from SDK 1.0
+without changing the API expected by this ROS driver. An SDK-only update does not change
+`ouster_sensor_msgs`, so leave the two ROS source references matched to each other.
+The backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).
+
+Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to
+replace an existing `src/ouster-ros`; preserve any local work and select a fresh source directory
+when changing pins. Running `vcs import` against only `ouster.repos` omits the SDK override.
+The runtime image records the requested repositories/refs and the actual commits at
+`/opt/ouster_driver/share/upstream-sources.json`, independently of the fleet message provenance.
+When upstream ROS adopts the fixed SDK, the override can be retired along with its fetch logic.
+
+The wrapper relies on upstream's launch CLI, parameter names, and the ROS driver's SDK API.
+Keep SDK overrides compatible with the selected ROS source. If `driver.launch.py` args
 (`params_file`, `ouster_ns`, `viz`) or `driver_params.yaml` keys are renamed, update
 `tools/render_params.py`, `docker/compose/compose.deploy.yaml`, and the healthcheck node name.
 

@@ -19,6 +19,11 @@ name: top                       # instance id -> ROS namespace /top; compose pro
 # direct ROS lifecycle commands do not change the supervisor's target.
 # initial_state: standby
 
+# On rig down / Docker stop / Ctrl-C: stop ROS cleanly, then park the sensor.
+# "unchanged" stops ROS without changing the sensor's operating mode.
+# Applied when creating the container; independent of initial_state/runtime target.
+shutdown_state: standby
+
 connection:
   type: lidar
   lidar:

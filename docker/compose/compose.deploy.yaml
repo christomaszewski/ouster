@@ -17,9 +17,14 @@ services:
     ipc: host                   # shared-memory transport: Fast DDS SHM, and LOAD-BEARING for zenoh
                                 # SHM (zenoh.shared_memory) — SHM engages per link only between
                                 # sessions sharing the host IPC namespace; else silent TCP fallback
+    # Zenoh locks both its own pool and mapped peer segments. Docker's default 8 MiB
+    # memlock limit cannot accommodate the configured 256 MiB pool, even with ipc: host.
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
     restart: unless-stopped
     init: true                 # reap descendants when the supervisor stops the launch process group
-    stop_grace_period: 45s
+    # Lifecycle cleanup + process reaping + physical standby confirmation.
+    stop_grace_period: 120s
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       # both RMWs ship in the image; export RMW_IMPLEMENTATION=rmw_zenoh_cpp to switch. The
@@ -40,6 +45,7 @@ services:
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
       OUSTER_TARGET_STATE: ${OUSTER_TARGET_STATE:-active}
+      OUSTER_SHUTDOWN_STATE: ${OUSTER_SHUTDOWN_STATE:-standby}
     volumes:
       # the single rendered params file, read-only (a single-file mount; not nested in any :ro dir)
       - ${OUSTER_PARAMS_HOST}:/etc/ouster_driver/params.yaml:ro

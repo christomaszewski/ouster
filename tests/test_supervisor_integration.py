@@ -63,7 +63,11 @@ class IntegrationTests(unittest.TestCase):
                 ros.write_text(f'''#!{sys.executable}
 import os, signal, sys, time, urllib.request
 if sys.argv[1:3] == ['lifecycle', 'get']:
+    print('2026-10-07T18:25:19Z WARN Watchdog Confirmator: priority denied')
     print('active [3]')
+    print('2026-10-07T18:25:19Z WARN Watchdog Validator: priority denied')
+    sys.exit(0)
+if sys.argv[1:3] == ['lifecycle', 'set']:
     sys.exit(0)
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -188,6 +192,49 @@ while True:
                             firmware.active["operating_mode"] = "NORMAL"
                         wait_state("standby")
                         self.assertEqual(len(starts.read_text().splitlines()), 2)
+
+                        # SIGTERM (Docker stop / rig down) must physically park
+                        # an active sensor, after killing its reconnect writer.
+                        operational.client("activate")
+                        wait_state("active")
+                        process.terminate()
+                        self.assertEqual(process.wait(timeout=10), 0)
+                        time.sleep(0.3)
+                        self.assertEqual(firmware.active["operating_mode"], "STANDBY")
+                        self.assertEqual((root / "target").read_text().strip(), "active")
+
+                        # Parking on shutdown must not replace the saved active
+                        # target. The opt-out stops ROS but leaves NORMAL intact.
+                        env["OUSTER_TARGET_STATE"] = "standby"
+                        env["OUSTER_SHUTDOWN_STATE"] = "unchanged"
+                        process = start()
+                        wait_state("active")
+                        process.send_signal(signal.SIGINT)
+                        self.assertEqual(process.wait(timeout=10), 0)
+                        self.assertEqual(firmware.active["operating_mode"], "NORMAL")
+
+                        # Shutdown during a stuck wake-up cancels the NORMAL
+                        # transition, then completes a separate STANDBY request.
+                        env["OUSTER_SHUTDOWN_STATE"] = "standby"
+                        with sensor.lock:
+                            firmware.active["operating_mode"] = "STANDBY"
+                            firmware.never_runs = True
+                            firmware.initializing_modes = {"NORMAL"}
+                        previous_starts = starts.read_text()
+                        process = start()
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            with sensor.lock:
+                                waking = firmware.active["operating_mode"] == "NORMAL"
+                            if waking:
+                                break
+                            time.sleep(0.1)
+                        self.assertTrue(waking, "supervisor did not begin waking sensor")
+                        process.terminate()
+                        self.assertEqual(process.wait(timeout=10), 0)
+                        self.assertEqual(firmware.active["operating_mode"], "STANDBY")
+                        self.assertEqual(starts.read_text(), previous_starts,
+                                         "driver started while sensor was initializing")
                 finally:
                     if process is not None and process.poll() is None:
                         process.terminate()

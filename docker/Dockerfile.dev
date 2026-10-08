@@ -1,5 +1,5 @@
 # Dev environment for the ouster wrapper. Mirrored by .devcontainer.json so every developer gets the
-# same toolchain. We vendor + build the UPSTREAM ouster-ros here (`vcs import src < ouster.repos`),
+# same toolchain. Fetch the ROS driver and SDK override with `python3 tools/fetch_upstream.py src`,
 # so the image ships the build toolchain + vcstool + rosdep — upstream deps are resolved per-build
 # from the vendored package.xml (NOT hand-listed, so they can't drift) — plus rviz2/rosbag2 for
 # viz + replay, and both RMWs (rmw_fastrtps_cpp default, rmw_zenoh_cpp opt-in via
