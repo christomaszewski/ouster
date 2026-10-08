@@ -1,0 +1,11 @@
+# SDK override for the ROS driver. Keep a full commit SHA for reproducible builds.
+# Based on upstream sdk-0.16.2/ouster-ros-0.15.0 (358c256); backports the SDK 1.0
+# legacy IMU packet bounds fix while preserving the 0.16.2 API.
+# Upstream backport: https://github.com/ouster-lidar/ouster-sdk/pull/727
+# tools/fetch_upstream.py replaces the ROS checkout's bundled/submodule SDK and
+# records both actual source revisions in upstream-sources.json.
+repositories:
+  ouster-sdk:
+    type: git
+    url: https://github.com/christomaszewski/ouster-sdk.git
+    version: 8559d7c76b03be69e76ac4f97c10f5d3f6e90f9a

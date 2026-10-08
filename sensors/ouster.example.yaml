@@ -11,18 +11,18 @@
 service: ouster
 name: top                       # instance id -> ROS namespace /top; compose project ouster_top (standalone)
 
-# Operational state `up` leaves the instance in (omit = active; the rig-owned RIG_TARGET_STATE
-# env, set at `up`, overrides this). For THIS sensor, standby physically means: the driver's
-# os_driver lifecycle node parked at `inactive` (configured, metadata cached, not reading
-# packets) AND the sensor itself in its own STANDBY operating mode — motor stopped, laser off
-# (the big power/heat cut), UDP streaming stopped; its HTTP config API stays up, so health
-# still proves the sensor is reachable while parked. `activate` (or `ros2 lifecycle set` from a
-# mission layer plus a mode restore) wakes it: sensor back to NORMAL (re-init + spin-up, tens
-# of seconds) then lifecycle active. NOTE: upstream's driver.launch.py always auto-activates,
-# so `initial_state: standby` is up-then-park — expect a brief active blip (a few seconds of
-# data possible) before the instance settles into standby; it also requires a detached
-# bring-up (`up -d`).
+# Initial state for a new container; RIG_TARGET_STATE overrides this at up.
+# Standby stops the driver process and physically parks the sensor (motor/laser off).
+# The container remains healthy while sensor status/config confirm standby; the ROS
+# driver node is absent. Activation wakes the sensor before launching the driver.
+# Runtime requests survive container restarts. Use the launcher/rig state verbs;
+# direct ROS lifecycle commands do not change the supervisor's target.
 # initial_state: standby
+
+# On rig down / Docker stop / Ctrl-C: stop ROS cleanly, then park the sensor.
+# "unchanged" stops ROS without changing the sensor's operating mode.
+# Applied when creating the container; independent of initial_state/runtime target.
+shutdown_state: standby
 
 connection:
   type: lidar
@@ -41,6 +41,8 @@ driver_params:                  # verbatim ros__parameters overrides; keys from 
   udp_profile_lidar: RNG19_RFL8_SIG16_NIR16
   point_type: original
   sensor_frame: ouster_sensor   # upstream defaults are os_sensor / os_lidar / os_imu
+                               # also used by /<ns>/temperature (Celsius, every 5s when available;
+                               # HTTP telemetry requires Rev 06+ for temperature, including standby)
   lidar_frame: ouster_lidar
   imu_frame: ouster_imu
   point_cloud_frame: ouster_lidar   # frame clouds/scans are stamped in; must EQUAL the value of

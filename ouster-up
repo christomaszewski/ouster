@@ -13,8 +13,8 @@
 #   ouster-up sensors/ouster_top.yaml logs -f
 #   ouster-up sensors/ouster_top.yaml down
 #   ouster-up sensors/ouster_top.yaml config     # render the merged compose
-#   ouster-up sensors/ouster_top.yaml standby    # park: driver inactive + sensor STANDBY mode
-#   ouster-up sensors/ouster_top.yaml activate   # wake: sensor NORMAL + driver active
+#   ouster-up sensors/ouster_top.yaml standby    # park: driver stopped + sensor STANDBY mode
+#   ouster-up sensors/ouster_top.yaml activate   # wake: sensor NORMAL + start driver
 #   ouster-up sensors/ouster_top.yaml state      # {"state": ...} JSON on stdout (read-only)
 #   ouster-up /any/host/path/ouster_top.yaml up -d   # config from anywhere (rig)
 #
@@ -36,7 +36,8 @@ fi
 
 # config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE / INITIAL_STATE; plain tokens) +
 # the rendered ZENOH_OVERRIDE pair string (shell-quoted by the renderer, safe for this eval).
-eval "$("$PYTHON" "$REPO/tools/render_params.py" --env "$CONFIG_ABS" | sed 's/^/export /')"
+ENV_LINES="$("$PYTHON" "$REPO/tools/render_params.py" --env "$CONFIG_ABS")"
+eval "$(printf '%s\n' "$ENV_LINES" | sed 's/^/export /')"
 PROJECT="${SERVICE}_${NAME}"
 
 # Verbs: `status` -> `ps`; standby/activate/state are the operational-state contract (handled
@@ -48,15 +49,25 @@ ARGS=("$@")
 STATE_VERB=""
 case "${ARGS[0]}" in standby|activate|state) STATE_VERB="${ARGS[0]}";; esac
 
-# Render the ROS 2 params file to a host staging path (one rendered file per instance) — except
-# for the state verbs, which only exec into (or query) an EXISTING container: they need the env
-# values below for compose interpolation but never the file on disk, and `state` must stay
-# side-effect-free like `config`/`status` (certify-safe: no volume creates, no renders).
+# Hash the validated params into the bind-mount path. Compose otherwise cannot
+# detect edits inside a mounted file and may reuse a supervisor with a cached old
+# sensor address. Inspection and teardown never modify files mounted by a driver.
 PARAMS_HOST="$REPO/var/run/${NAME}.params.yaml"
-if [ -z "$STATE_VERB" ]; then
-  mkdir -p "$REPO/var/run"
-  "$PYTHON" "$REPO/tools/render_params.py" "$CONFIG_ABS" > "$PARAMS_HOST"
-fi
+case "${ARGS[0]}" in
+  up|create|run|config)
+    PARAMS_CONTENT="$("$PYTHON" "$REPO/tools/render_params.py" "$CONFIG_ABS")"
+    PARAMS_HASH="$(printf '%s\n' "$PARAMS_CONTENT" | "$PYTHON" -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+    PARAMS_HOST="$REPO/var/run/${NAME}.${PARAMS_HASH}.params.yaml"
+    # `rig bake` captures the file bind discovered by `config`, so it also
+    # needs the validated input on disk. Existing mounted files stay intact.
+    mkdir -p "$REPO/var/run"
+    PARAMS_TEMP="$(mktemp "$REPO/var/run/.${NAME}.params.XXXXXX")"
+    trap 'rm -f "$PARAMS_TEMP"' EXIT
+    printf '%s\n' "$PARAMS_CONTENT" > "$PARAMS_TEMP"
+    mv "$PARAMS_TEMP" "$PARAMS_HOST"
+    trap - EXIT
+    ;;
+esac
 
 # Compose env: this instance's params file, ROS namespace, and instance name (the metadata volume
 # is ouster_<name>_metadata). The deploy image is resolved by the compose file itself (OUSTER_IMAGE
@@ -65,6 +76,7 @@ fi
 export OUSTER_PARAMS_HOST="$PARAMS_HOST"
 export OUSTER_NAMESPACE="$NAMESPACE"
 export OUSTER_NAME="$NAME"
+export OUSTER_SHUTDOWN_STATE="$SHUTDOWN_STATE"
 
 # Opt-in zenoh session overrides, derived from the config's `zenoh:` block (SHM sugar + generic
 # overrides; empty = no block; see the catalog entry in sensors/ouster.example.yaml). One rendered
@@ -76,8 +88,8 @@ FILES=(-f "$REPO/docker/compose/compose.deploy.yaml")
 
 # The driver persists sensor metadata to ~/.ros/{hostname}_metadata.json; compose mounts the
 # per-instance external volume ouster_<name>_metadata there (rig GCs it only on `rig down --purge`).
-# Ensure it exists before a bring-up — `config`/`down`/`status`/`logs` and the state verbs stay
-# side-effect-free so `rig certify` can render `config` under a poisoned env.
+# Only `up` creates the volume; rendering `config` for bake/certify never creates
+# Docker resources, and inspection/state commands never create containers.
 [ "${ARGS[0]}" = "up" ] && docker volume create "ouster_${NAME}_metadata" >/dev/null
 
 # rig owns the compose project name (it exports COMPOSE_PROJECT_NAME per call); honor it when
@@ -107,12 +119,8 @@ if [ -n "$STATE_VERB" ]; then
   exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh "$STATE_VERB"
 fi
 
-# --- initial operational state (applies to `up` only) ----------------------------------------
-# Precedence: RIG_TARGET_STATE (rig-owned env token; "bring the whole vehicle up parked" beats
-# per-instance defaults) > config `initial_state` > active. Upstream's driver.launch.py always
-# auto-configures + auto-activates (no launch knob stops at `configured`), so standby-at-up is
-# up-then-transition: a brief active blip (seconds of data possible) before parking — see the
-# note in sensors/ouster.example.yaml.
+# The supervisor receives the initial target BEFORE starting the upstream driver.
+# Standby startup never spins the sensor up just to park it again.
 TARGET_STATE="${INITIAL_STATE}"
 if [ "${ARGS[0]}" = "up" ] && [ -n "${RIG_TARGET_STATE:-}" ]; then
   case "$RIG_TARGET_STATE" in
@@ -120,33 +128,65 @@ if [ "${ARGS[0]}" = "up" ] && [ -n "${RIG_TARGET_STATE:-}" ]; then
     *) echo "ouster-up: RIG_TARGET_STATE='$RIG_TARGET_STATE' must be 'standby' or 'active'" >&2; exit 1 ;;
   esac
 fi
+export OUSTER_TARGET_STATE="$TARGET_STATE"
 
-if [ "${ARGS[0]}" = "up" ] && [ "$TARGET_STATE" = "standby" ]; then
-  DETACHED=""
-  for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
-  if [ -z "$DETACHED" ]; then
-    echo "ouster-up: initial state 'standby' needs a detached bring-up ('up -d') — the launcher must transition the instance after it settles" >&2
-    exit 1
+# Compose down does not propagate the stopped container's exit status, and
+# removes its logs. Stop first so rig can distinguish confirmed shutdown from a
+# failed park (or SIGKILL), then perform the requested teardown in either case.
+if [ "${ARGS[0]}" = down ]; then
+  CONTAINERS="$(docker compose "${FILES[@]}" ps -aq driver)"
+  STOP_ARGS=(stop)
+  for ((i = 1; i < ${#ARGS[@]}; i++)); do
+    case "${ARGS[i]}" in
+      -t|--timeout)
+        STOP_ARGS+=("${ARGS[i]}" "${ARGS[i+1]:?missing stop timeout}")
+        i=$((i + 1)) ;;
+      --timeout=*|-t[0-9]*) STOP_ARGS+=("${ARGS[i]}") ;;
+    esac
+  done
+  DOWN_EXIT_STATUS=0
+  if [ -n "$CONTAINERS" ]; then
+    docker compose "${FILES[@]}" "${STOP_ARGS[@]}" driver
+    for container in $CONTAINERS; do
+      EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$container")" || EXIT_CODE=unknown
+      if [ "$EXIT_CODE" != 0 ]; then
+        echo "ouster-up: shutdown failed (container $container exit $EXIT_CODE); sensor state unconfirmed" >&2
+        docker logs --tail 40 "$container" >&2 || true
+        DOWN_EXIT_STATUS=1
+      fi
+    done
   fi
-  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=standby" >&2
+  docker compose "${FILES[@]}" "${ARGS[@]}" || DOWN_EXIT_STATUS=1
+  exit "$DOWN_EXIT_STATUS"
+fi
+
+DETACHED=""
+for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
+if [ "${ARGS[0]}" = "up" ] && [ -n "$DETACHED" ]; then
+  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
   docker compose "${FILES[@]}" "${ARGS[@]}"
-  # Wait out the auto-activate blip until the instance is SETTLED (active — or already standby
-  # on an idempotent re-up), then park it. Budget covers sensor init + configure->activate.
-  SETTLE_BUDGET="${OUSTER_STANDBY_SETTLE_TIMEOUT:-180}"
+  # Also converge an existing container whose runtime target changed since its
+  # creation. The supervisor retains runtime requests across container restarts.
+  SETTLE_BUDGET="${OUSTER_SETTLE_TIMEOUT:-${OUSTER_STANDBY_SETTLE_TIMEOUT:-300}}"
   DEADLINE=$((SECONDS + SETTLE_BUDGET))
+  TARGET_VERB=activate
+  OTHER_TARGET=standby
+  [ "$TARGET_STATE" = standby ] && TARGET_VERB=standby
+  [ "$TARGET_STATE" = standby ] && OTHER_TARGET=active
   while :; do
     STATE_JSON="$(docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh state 2>/dev/null)" || STATE_JSON=""
     case "$STATE_JSON" in
-      *'"state": "active"'*|*'"state": "standby"'*) break ;;
+      *"\"state\": \"$TARGET_STATE\""*) exit 0 ;;
+      *'"state": "active"'*|*'"state": "standby"'*|*"target:$OTHER_TARGET;"*)
+        docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh "$TARGET_VERB" >&2 || true ;;
     esac
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-      echo "ouster-up: instance did not settle within ${SETTLE_BUDGET}s (last probe: ${STATE_JSON:-unreachable}) — left up; check 'status' / 'logs'" >&2
+      echo "ouster-up: instance did not reach $TARGET_STATE within ${SETTLE_BUDGET}s (last probe: ${STATE_JSON:-unreachable}) — left up; check 'status' / 'logs'" >&2
       exit 1
     fi
     sleep 3
   done
-  exec docker compose "${FILES[@]}" exec -T driver /usr/local/bin/statectl.sh standby
 fi
 
-echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST" >&2
+echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
 exec docker compose "${FILES[@]}" "${ARGS[@]}"

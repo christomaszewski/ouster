@@ -8,7 +8,7 @@
 #     docker compose -f docker/compose/compose.replay.yaml up
 #
 # Uses the dev image (toolchain + rviz2 + rosbag2). First vendor upstream on the host
-# (`mkdir -p src && vcs import src < ouster.repos`, + guarded submodule init — see README
+# (`python3 tools/fetch_upstream.py src` — see README
 # quick start) so the bind-mounted src/ is populated; the first run resolves deps + builds
 # the vendored workspace.
 name: ouster_replay

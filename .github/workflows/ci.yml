@@ -38,11 +38,18 @@ jobs:
           context: .
           file: docker/Dockerfile.runtime
           push: false
-          load: false
+          load: true
+          tags: ouster_driver:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             ROS_DISTRO=${{ env.ROS_DISTRO }}
+      - name: Test packaged supervisor and ROS temperature topic
+        run: |
+          docker run --rm --init --network none \
+            -e OUSTER_TEST_ENTRYPOINT_DIR=/usr/local/bin \
+            -v "$PWD:/workspace:ro" -w /workspace ouster_driver:ci \
+            python3 -m unittest discover -s tests -v
 
   # ---------------------------------------------------------------------------
   # rig launcher contract, executable (see rigging.yaml). `rig certify` runs
@@ -108,73 +115,16 @@ jobs:
           grep -q -- '--build-arg BASE_IMAGE=reg.example:5000/fleet-ros:v9' "${DOCKER_ARGV_LOG}"
 
   # ---------------------------------------------------------------------------
-  # Operational-state contract, launcher side (see rigging.yaml verbs:). The
-  # in-container half (statectl.sh, healthcheck.sh) needs a sensor — hardware
-  # validation is a separate matrix — but the launcher's contract surface is
-  # testable with a stubbed docker: `state` answers down as JSON on a clean
-  # stdout, transitions refuse to create containers, RIG_TARGET_STATE /
-  # initial_state are validated, and standby-at-up drives up -d + transition.
+  # Operational-state regressions: firmware HTTP behavior, process ownership,
+  # recovery ordering, state/health, and launcher contracts. No sensor required.
   # ---------------------------------------------------------------------------
   state-contract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: python3 -m pip install --user pyyaml
-      - name: launcher state verbs against a stubbed docker
-        run: |
-          mkdir -p "${RUNNER_TEMP}/stub"
-          cat > "${RUNNER_TEMP}/stub/docker" <<'EOF'
-          #!/usr/bin/env bash
-          echo "docker $*" >> "${DOCKER_ARGV_LOG}"
-          case "$*" in
-            "compose version") exit 0 ;;
-            *" ps -q driver"|*" ps -aq driver") exit 0 ;;   # no containers
-            *" exec -T driver "*) exit 1 ;;                 # nothing to exec into
-            *) exit 0 ;;
-          esac
-          EOF
-          chmod +x "${RUNNER_TEMP}/stub/docker"
-          export PATH="${RUNNER_TEMP}/stub:${PATH}"
-          export DOCKER_ARGV_LOG="${RUNNER_TEMP}/argv.log"
-          # `! cmd` is exempt from -e, so a surprise success would pass silently
-          must_fail() { if "$@" >/dev/null 2>&1; then echo "expected failure: $*"; exit 1; fi; }
-
-          # state on a down project: exactly the JSON on stdout, exit 0, no render left behind
-          : > "${DOCKER_ARGV_LOG}"
-          out="$(./ouster-up sensors/ouster.example.yaml state)"
-          [ "$out" = '{"state": "down", "detail": "no containers"}' ]
-          [ ! -e var/run/top.params.yaml ]
-
-          # transitions never create containers: standby/activate fail on a down project,
-          # nothing on stdout, and no compose up / volume create was attempted
-          : > "${DOCKER_ARGV_LOG}"
-          out="$(./ouster-up sensors/ouster.example.yaml standby 2>/dev/null)" \
-            && { echo "standby succeeded on a down project"; exit 1; }
-          [ -z "$out" ]
-          must_fail ./ouster-up sensors/ouster.example.yaml activate
-          must_fail grep -qE ' up | volume create ' "${DOCKER_ARGV_LOG}"
-
-          # initial-state validation is a hard error, before anything runs
-          must_fail env RIG_TARGET_STATE=parked ./ouster-up sensors/ouster.example.yaml up -d
-          sed 's/^# initial_state: standby/initial_state: parked/' \
-            sensors/ouster.example.yaml > "${RUNNER_TEMP}/bad.yaml"
-          must_fail ./ouster-up "${RUNNER_TEMP}/bad.yaml" up -d
-
-          # initial_state: standby needs a detached bring-up; with -d it runs `up -d` and
-          # then polls/transitions via exec (stub exec fails -> settle timeout -> nonzero)
-          sed 's/^# initial_state: standby/initial_state: standby/' \
-            sensors/ouster.example.yaml > "${RUNNER_TEMP}/standby.yaml"
-          must_fail ./ouster-up "${RUNNER_TEMP}/standby.yaml" up
-          : > "${DOCKER_ARGV_LOG}"
-          must_fail env OUSTER_STANDBY_SETTLE_TIMEOUT=5 \
-            ./ouster-up "${RUNNER_TEMP}/standby.yaml" up -d
-          grep -q ' up -d' "${DOCKER_ARGV_LOG}"
-          grep -q ' exec -T driver /usr/local/bin/statectl.sh state' "${DOCKER_ARGV_LOG}"
-
-          # RIG_TARGET_STATE=active beats a standby config: plain forwarded up, no statectl
-          : > "${DOCKER_ARGV_LOG}"
-          RIG_TARGET_STATE=active ./ouster-up "${RUNNER_TEMP}/standby.yaml" up -d 2>/dev/null
-          must_fail grep -q statectl "${DOCKER_ARGV_LOG}"
+      - name: lifecycle and launcher regressions
+        run: python3 -m unittest discover -s tests -v
 
   # ---------------------------------------------------------------------------
   # Shell hygiene on the deploy surface (launcher + build script + entrypoints).

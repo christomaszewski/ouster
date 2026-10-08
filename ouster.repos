@@ -1,7 +1,7 @@
 # Upstream Ouster ROS 2 driver — fetched at image-build time by docker/Dockerfile.runtime
-# (`vcs import` + a guarded submodule init). Nothing upstream is committed to this repo; it
-# lives only in the build and in a gitignored src/ for local dev (`vcs import`). That keeps this
-# wrapper tiny and an upstream update down to a one-line bump here.
+# (tools/fetch_upstream.py, using vcstool). Nothing upstream is committed to this repo;
+# it lives only in the build and in a gitignored src/ for local dev. The SDK override is
+# pinned independently in ouster-sdk.repos and applied by the same fetch helper.
 #
 # `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. A bump
 # here must also bump rigging.yaml `msgs.source.ref` (the fleet-ros-msgs overlay pin for
@@ -10,10 +10,7 @@
 # (`kilted-0.15.1`, `rolling-0.15.1`, … all the same commit). Bump this to a newer release tag to
 # update; watch for a future `lyrical-*` tag. See README "Updating upstream".
 #
-# Move to a LAN mirror later with ONLY a `url` change (keep `version`). At this pin the Ouster SDK
-# is vendored INSIDE the upstream repo (no submodule), so a mirror needs just this one repo; some
-# tags instead use a submodule (ouster_example) — the Docker build runs a guarded submodule init to
-# cover both, and such a tag would additionally need the SDK repo mirrored.
+# A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
 repositories:
   ouster-ros:
     type: git

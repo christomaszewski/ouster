@@ -1,8 +1,10 @@
 # Docker images for the ouster wrapper
 
 Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this workspace, the
-**upstream `ouster-ros` source is fetched at build time** (`vcs import` from
-[`../ouster.repos`](../ouster.repos)) — nothing upstream is committed here.
+**upstream `ouster-ros` and the SDK fork are fetched at build time** from
+[`../ouster.repos`](../ouster.repos) and [`../ouster-sdk.repos`](../ouster-sdk.repos).
+The shared `tools/fetch_upstream.py` helper applies the SDK override and records both commits;
+the runtime retains that record at `/opt/ouster_driver/share/upstream-sources.json`.
 
 | Image | What | When |
 |---|---|---|
@@ -19,9 +21,11 @@ Optional SDK features (pcap/osf/viz/mapping) are built OFF, keeping the exec-onl
 correct and slim.
 Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at
 0.15.1 but declared build-only), [`runtime_extra_deps/package.xml`](runtime_extra_deps/package.xml)
-patches the gap through the same rosdep pass, and an `ldd` gate in `Dockerfile.runtime` fails the
-image build if any shipped binary still misses a shared library — so a future pin bump can't
-reintroduce this class of bug silently.
+patches the gap through the same rosdep pass. The image build checks missing libraries with
+`ldd`, then eagerly loads the ROS libraries with `check_runtime.py` to catch undefined symbols
+in generated type support too. A matching library filename alone does not establish ABI
+compatibility. This matters under `rmw_zenoh_cpp` as well: it uses the Fast RTPS type-support
+serialization callbacks, even though the transport is Zenoh.
 
 ## Build the runtime image
 
@@ -33,12 +37,15 @@ docker buildx build --platform linux/arm64 -f docker/Dockerfile.runtime -t ouste
 ```
 
 Under rig, `build_image.sh` follows the rig build-env contract: `RIG_BASE_IMAGE` re-parents the
-runtime stage onto the deployment's shared base (fleet-ros), `ROS_DISTRO` forwards the fleet
+build and runtime stages onto the deployment's shared base (fleet-ros), `ROS_DISTRO` forwards the fleet
 distro, and `RIG_BUILD_NO_CACHE` maps to `--no-cache --pull` — the deliberate way the parent
-image (the fleet's ros-* version authority) advances. Both stages hold apt at the parent's
-package versions (`APT::Get::Upgrade "false"` in `/etc/apt/apt.conf.d/99-rig-apt-policy`), so
-uncached rebuilds can't drift past the parent and `rig image audit`'s cross-image agreement
-holds. See the header comments in `Dockerfile.runtime` and `tools/build_image.sh`.
+image (the fleet's ros-* version authority) advances. Both stages use `apt-mark hold` for the
+parent's ROS packages: `APT::Get::Upgrade "false"` alone does not prevent dependency-driven
+upgrades. A dependency requiring newer held ROS packages fails the build; refresh the fleet
+base deliberately in that case. The final check also compares installed ROS packages against
+`/opt/ouster_driver/share/build-ros-packages.tsv`, captured from the compiler environment.
+`rig image audit` checks agreement between final images and source provenance; it does not
+check the discarded compiler environment or resolve the symbols inside custom libraries.
 
 ## Dev container
 
@@ -46,11 +53,11 @@ holds. See the header comments in `Dockerfile.runtime` and `tools/build_image.sh
 docker compose -f docker/compose/compose.dev.yaml up -d
 docker compose -f docker/compose/compose.dev.yaml exec dev bash
 # inside the container:
-mkdir -p src && vcs import src < ouster.repos          # vendor upstream into src/
-git -C src/ouster-ros submodule update --init --recursive 2>/dev/null || true   # some pins use one
+python3 tools/fetch_upstream.py src                  # ROS + patched SDK; fresh checkout only
 rosdep install --from-paths src --ignore-src -y        # resolve upstream deps
 colcon build --base-paths src --merge-install \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+    -DCMAKE_PROJECT_ouster_ros_INCLUDE="$PWD/docker/ament_target_dependencies_compat.cmake"
 ```
 
 Or via VS Code: `F1` → "Dev Containers: Reopen in Container" (uses `.devcontainer.json`).
@@ -113,8 +120,15 @@ a full pool falls back to TCP per message). Never set the `ZENOH_SHM_ALLOC_SIZE`
 aliases the pool-size key and rmw inserts it *after* `ZENOH_CONFIG_OVERRIDE`, silently
 overriding the knob. Inert under Fast DDS.
 
+Zenoh also **locks** its SHM mappings. Compose raises `memlock` for the driver; subscribers
+that map its pools need the same allowance, even if their own publishing pool is small.
+`ipc: host` supplies shared `/dev/shm` but does not raise locked-memory limits. With Docker's
+8 MiB default, a 256 MiB pool fails with `Unable to create POSIX shm segment: OS error 12`
+even when `/dev/shm` has ample space. Use `ulimits: {memlock: {soft: -1, hard: -1}}` for each
+SHM participant (or an explicitly budgeted limit covering its own and peer mappings).
+
 **Rig-less dev only:** with no rig to provide the router, the runtime image doubles as the router
-image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the driver's
+image since it ships `rmw_zenoh_cpp` — disable the baked healthcheck (it probes the supervisor's
 `os_driver` node, which is meaningless for a router and would leave the container permanently
 unhealthy):
 
@@ -151,7 +165,7 @@ generates one):
 ./ouster-up sensors/ouster_top.yaml status    # docker compose ps
 ./ouster-up sensors/ouster_top.yaml logs -f
 ./ouster-up sensors/ouster_top.yaml config    # render the merged compose (no run)
-./ouster-up sensors/ouster_top.yaml standby   # park: driver inactive + sensor STANDBY mode
+./ouster-up sensors/ouster_top.yaml standby   # park: driver stopped + sensor STANDBY mode
 ./ouster-up sensors/ouster_top.yaml activate  # wake: sensor NORMAL + driver active
 ./ouster-up sensors/ouster_top.yaml state     # {"state": ...} JSON on stdout (read-only)
 ./ouster-up sensors/ouster_top.yaml down
@@ -160,6 +174,18 @@ generates one):
 Each sensor becomes its own compose project (the rig-injected `COMPOSE_PROJECT_NAME`, or
 `ouster_<name>` standalone) under ROS namespace `/<name>`, so multiple instances never collide.
 Needs the Docker Compose v2 plugin and host PyYAML (`apt install python3-yaml`).
+
+The runtime supervisor keeps the container running in standby and stops the ROS driver
+process. Use the launcher state verbs rather than direct ROS lifecycle commands. Standby
+startup does not briefly wake the sensor. See the root README for state/restart semantics.
+Bare runtime `docker run` invocations must use `--init` and mount the sensor params file at
+`/etc/ouster_driver/params.yaml`; compose supplies both automatically.
+
+Container shutdown parks the sensor by default (`shutdown_state: standby` in the sensor
+YAML, passed as `OUSTER_SHUTDOWN_STATE`). `unchanged` opts out of the sensor mode change.
+Compose's 120-second stop grace covers lifecycle cleanup, process reaping, and standby
+confirmation. For bare `docker run`, set `--stop-timeout 120` too. The policy applies to
+Docker restarts as well as `rig down`; shutdown never replaces the saved startup target.
 
 | File | Role |
 |------|------|

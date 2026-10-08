@@ -21,7 +21,7 @@ ZENOH_CONFIG_OVERRIDE pair string, and emitted (`--env` mode) for the entrypoint
 export. Used by `ouster-up`:
 
   render_params.py <config.yaml>          # -> the ROS 2 params YAML on stdout
-  render_params.py --env <config.yaml>    # -> SERVICE/NAME/NAMESPACE/TYPE/INITIAL_STATE env lines
+  render_params.py --env <config.yaml>    # -> identity, startup/shutdown state, Zenoh env lines
 
 The params doc is keyed by the `/**` wildcard node so it binds regardless of the namespace rig
 pushes via `ouster_ns`. (Upstream's own driver_params.yaml keys the explicit node path
@@ -177,6 +177,12 @@ def main() -> int:
                          "must be 'standby' or 'active'\n")
         sys.exit(2)
 
+    shutdown_state = cfg.get("shutdown_state", "standby")
+    if shutdown_state not in ("standby", "unchanged"):
+        sys.stderr.write(f"render_params: shutdown_state {shutdown_state!r} "
+                         "must be 'standby' or 'unchanged'\n")
+        return 2
+
     if env_mode:
         # warn only where the knob is CONSUMED (params mode never reads `zenoh:`), so one
         # ouster-up run -- which invokes both modes -- surfaces each warning exactly once
@@ -184,9 +190,11 @@ def main() -> int:
             sys.stderr.write("render_params: " + warn + "\n")
         # identity tokens are ident-safe by construction; the override pair string is NOT (JSON
         # quotes/brackets/spaces), so shlex-quote it for the launcher's eval'd `export` block.
-        # INITIAL_STATE is always emitted (default included) so a stale env value can't leak in.
-        lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}", f"TYPE={ttype}",
+        # Both state settings include defaults so stale env values cannot leak in.
+        lines = [f"SERVICE={service}", f"NAME={name}", f"NAMESPACE=/{namespace}",
+                 "TYPE=" + shlex.quote(ttype),
                  f"INITIAL_STATE={initial_state}",
+                 f"SHUTDOWN_STATE={shutdown_state}",
                  "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs)]
         print("\n".join(lines))
         return 0
@@ -197,6 +205,10 @@ def main() -> int:
     merged.update(derive_connection(connection))
     for key, value in (cfg.get("driver_params") or {}).items():
         merged[key] = value
+    if merged.get("operating_mode") not in (None, "", "NORMAL"):
+        sys.stderr.write("render_params: omit driver_params.operating_mode or use NORMAL; "
+                         "select standby with initial_state instead\n")
+        return 2
     doc = {"/**": {"ros__parameters": merged}}
     yaml.safe_dump(doc, sys.stdout, default_flow_style=False, sort_keys=False)
     return 0
