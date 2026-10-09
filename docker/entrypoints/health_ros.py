@@ -7,6 +7,7 @@ import threading
 import time
 
 from health import HealthReporter
+from lifecycle_ros import LifecycleClient
 
 LOG = logging.getLogger("ouster-health")
 
@@ -32,6 +33,7 @@ def health_monitor(controller, namespace, params, stop_event, changing):
     reporter = HealthReporter(os.environ.get("OUSTER_NAME") or namespace.strip("/"),
         os.environ.get("VEHICLE_ID", ""), json.loads(os.environ.get("OUSTER_HEALTH_CONFIG") or "{}"))
     context, node, worker, spinner, executor = Context(), None, None, None, None
+    spin_stop = threading.Event()
     try:
         rclpy.init(args=[], context=context, signal_handler_options=SignalHandlerOptions.NO)
         node = rclpy.create_node("sensor_health", namespace=namespace, context=context,
@@ -44,6 +46,7 @@ def health_monitor(controller, namespace, params, stop_event, changing):
             node.create_subscription(Telemetry, "telemetry", lambda _: reporter.packet_seen(), qos_profile_sensor_data)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
+        controller.driver.lifecycle_client = LifecycleClient(node, controller.driver.node)
         next_warning = 0
 
         def guarded(action):
@@ -56,6 +59,8 @@ def health_monitor(controller, namespace, params, stop_event, changing):
                     next_warning = time.monotonic() + 60
 
         def publish_health():
+            if stop_event.is_set():
+                return
             message = DiagnosticArray()
             message.header.stamp = receipt_clock.now().to_msg()
             for report in reporter.snapshot(controller.health_state(), changing=changing.is_set(), stream_enabled=stream_enabled):
@@ -87,7 +92,9 @@ def health_monitor(controller, namespace, params, stop_event, changing):
                 stop_event.wait(reporter.settings["poll_interval_s"])
 
         def spin_loop():
-            while not stop_event.is_set():
+            # SIGTERM stops health polling, but lifecycle replies still need
+            # this executor while the supervisor drains/stops the driver.
+            while not spin_stop.is_set():
                 guarded(lambda: executor.spin_once(timeout_sec=0.2))
 
         worker = threading.Thread(target=collect_loop, name="sensor-health-http", daemon=True)
@@ -97,6 +104,10 @@ def health_monitor(controller, namespace, params, stop_event, changing):
         yield
     finally:
         stop_event.set()
+        controller.driver.lifecycle_client = None
+        spin_stop.set()
+        if executor:
+            executor.wake()
         for thread in (worker, spinner):
             if thread:
                 thread.join()

@@ -61,22 +61,56 @@ class IntegrationTests(unittest.TestCase):
                 # Simulate a driver recovery task that repeatedly sets NORMAL.
                 # It MUST be dead before the controller writes STANDBY.
                 ros.write_text(f'''#!{sys.executable}
-import os, signal, sys, time, urllib.request
+import importlib.util, os, signal, sys, time, urllib.request
 if sys.argv[1:3] == ['lifecycle', 'get']:
+    with open(os.environ['FAKE_DRIVER_CLI'], 'a') as stream:
+        stream.write('get\\n')
     print('2026-10-07T18:25:19Z WARN Watchdog Confirmator: priority denied')
     print('active [3]')
     print('2026-10-07T18:25:19Z WARN Watchdog Validator: priority denied')
     sys.exit(0)
 if sys.argv[1:3] == ['lifecycle', 'set']:
+    with open(os.environ['FAKE_DRIVER_CLI'], 'a') as stream:
+        stream.write('set\\n')
     sys.exit(0)
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 with open(os.environ['FAKE_DRIVER_STARTS'], 'a') as stream:
     stream.write(str(os.getpid()) + '\\n')
-while True:
+def write_normal():
     urllib.request.urlopen(os.environ['FAKE_SENSOR'] + '/api/v1/sensor/cmd/set_config_param?args=.+%7B%22operating_mode%22%3A%22NORMAL%22%2C%22udp_port_lidar%22%3A7502%7D', timeout=1).close()
     urllib.request.urlopen(os.environ['FAKE_SENSOR'] + '/api/v1/sensor/cmd/reinitialize', timeout=1).close()
-    time.sleep(0.2)
+if importlib.util.find_spec('rclpy'):
+    import rclpy
+    from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
+    class TestDriver(LifecycleNode):
+        def on_activate(self, state):
+            self.writer = self.create_timer(0.2, write_normal)
+            return TransitionCallbackReturn.SUCCESS
+        def on_deactivate(self, state):
+            self.destroy_timer(self.writer)
+            with open(os.environ['FAKE_DRIVER_TRANSITIONS'], 'a') as stream:
+                stream.write('deactivate\\n')
+            return TransitionCallbackReturn.SUCCESS
+        def on_cleanup(self, state):
+            with open(os.environ['FAKE_DRIVER_TRANSITIONS'], 'a') as stream:
+                stream.write('cleanup\\n')
+            return TransitionCallbackReturn.SUCCESS
+    rclpy.init(args=[])
+    node = TestDriver('os_driver', namespace=os.environ['OUSTER_NAMESPACE'])
+    node.trigger_configure()
+    node.trigger_activate()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+else:
+    while True:
+        write_normal()
+        time.sleep(0.2)
 ''')
                 ros.chmod(0o755)
                 params = root / "params.yaml"
@@ -88,6 +122,8 @@ while True:
                            OUSTER_PARAMS_FILE=str(params), OUSTER_STATE_SOCKET=socket_path,
                            OUSTER_TARGET_FILE=str(root / "target"), OUSTER_TARGET_STATE="standby",
                            OUSTER_NAMESPACE="test_ouster",
+                           FAKE_DRIVER_CLI=str(root / "cli"),
+                           FAKE_DRIVER_TRANSITIONS=str(root / "transitions"),
                            FAKE_DRIVER_STARTS=str(starts), FAKE_SENSOR=f"http://127.0.0.1:{sensor.server_port}")
                 log = (root / "supervisor.log").open("w+")
                 process = None
@@ -221,8 +257,18 @@ while True:
                         # an active sensor, after killing its reconnect writer.
                         operational.client("activate")
                         wait_state("active")
+                        if HAS_ROS:
+                            transitions_before = (root / "transitions").read_text()
+                        shutdown_started = time.monotonic()
                         process.terminate()
                         self.assertEqual(process.wait(timeout=10), 0)
+                        if HAS_ROS:
+                            elapsed = time.monotonic() - shutdown_started
+                            print(f"simulated sensor shutdown with ROS lifecycle: {elapsed:.2f}s")
+                            self.assertEqual((root / "transitions").read_text(),
+                                             transitions_before + "deactivate\ncleanup\n")
+                            self.assertFalse((root / "cli").exists(),
+                                             "persistent lifecycle calls fell back to CLI")
                         time.sleep(0.3)
                         self.assertEqual(firmware.active["operating_mode"], "STANDBY")
                         self.assertEqual((root / "target").read_text().strip(), "active")

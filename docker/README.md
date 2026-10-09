@@ -183,8 +183,11 @@ Bare runtime `docker run` invocations must use `--init` and mount the sensor par
 
 Container shutdown parks the sensor by default (`shutdown_state: standby` in the sensor
 YAML, passed as `OUSTER_SHUTDOWN_STATE`). `unchanged` opts out of the sensor mode change.
-Compose's 120-second stop grace covers lifecycle cleanup, process reaping, and standby
-confirmation. For bare `docker run`, set `--stop-timeout 120` too. The policy applies to
+Lifecycle cleanup uses persistent service clients on the health node; its executor remains
+available until the driver is stopped. Health publish/poll intervals do not delay these calls.
+Compose's 120-second stop grace is an upper bound for lifecycle cleanup, process reaping, and
+standby confirmation, not a fixed wait. Timing logs identify which phase is slow. For bare
+`docker run`, set `--stop-timeout 120` too. The policy applies to
 Docker restarts as well as `rig down`; shutdown never replaces the saved startup target.
 
 | File | Role |

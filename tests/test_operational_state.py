@@ -414,6 +414,60 @@ class ControllerTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_persistent_lifecycle_drains_before_signalling_without_cli(self):
+        from unittest.mock import Mock
+        for state, expected in (("active", ["deactivate", "cleanup"]),
+                                ("inactive", ["cleanup"]),
+                                ("unconfigured", [])):
+            with self.subTest(state=state):
+                driver = operational.Driver("unused", "/test")
+                driver.process = Mock(pid=123)
+                driver.process.poll.return_value = None
+                driver.lifecycle_client = Mock()
+                driver.lifecycle_client.state.return_value = state
+                calls = []
+                driver.lifecycle_client.transition.side_effect = calls.append
+
+                def signal_finished_group(*_):
+                    calls.append("signal")
+                    raise ProcessLookupError
+
+                with patch.object(operational.subprocess, "run") as cli, \
+                        patch.object(operational.os, "killpg", side_effect=signal_finished_group):
+                    driver.stop()
+                self.assertEqual(calls, expected + ["signal"])
+                cli.assert_not_called()
+                self.assertIsNone(driver.process)
+
+    def test_persistent_lifecycle_failure_still_stops_group_without_cli_retry(self):
+        from unittest.mock import Mock
+        for failure in (TimeoutError("no reply"), RuntimeError("transition rejected")):
+            with self.subTest(failure=failure):
+                driver = operational.Driver("unused", "/test")
+                driver.process = Mock(pid=123)
+                driver.process.poll.return_value = None
+                driver.lifecycle_client = Mock()
+                driver.lifecycle_client.state.return_value = "active"
+                driver.lifecycle_client.transition.side_effect = failure
+                with patch.object(operational.subprocess, "run") as cli, \
+                        patch.object(operational.os, "killpg", side_effect=ProcessLookupError()) as kill, \
+                        self.assertLogs("ouster-state", "WARNING"):
+                    driver.stop()
+                kill.assert_called_once_with(123, signal.SIGINT)
+                cli.assert_not_called()
+                self.assertIsNone(driver.process)
+
+    def test_persistent_lifecycle_probe_failure_reports_unreachable(self):
+        from unittest.mock import Mock
+        driver = operational.Driver("unused", "/test")
+        driver.process = Mock()
+        driver.process.poll.return_value = None
+        driver.lifecycle_client = Mock()
+        driver.lifecycle_client.state.side_effect = TimeoutError("no reply")
+        with patch.object(operational.subprocess, "run") as cli:
+            self.assertEqual(driver.lifecycle(), "unreachable")
+        cli.assert_not_called()
+
     def test_stop_drains_reader_and_scan_threads_before_signalling(self):
         from unittest.mock import Mock
         driver = operational.Driver("unused", "/test")

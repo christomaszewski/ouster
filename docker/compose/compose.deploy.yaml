@@ -23,7 +23,7 @@ services:
       memlock: { soft: -1, hard: -1 }
     restart: unless-stopped
     init: true                 # reap descendants when the supervisor stops the launch process group
-    # Lifecycle cleanup + process reaping + physical standby confirmation.
+    # Maximum failure budget, not a fixed wait: drain ROS, reap processes, confirm standby.
     stop_grace_period: 120s
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}

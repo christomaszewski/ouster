@@ -166,9 +166,16 @@ the sensor is parked again when reachable.
 The supervisor first requests lifecycle `deactivate` and `cleanup`, which drain upstream's
 UDP and scan-processing threads before ROS/Zenoh closes. It then stops and reaps the entire
 driver process group, applies nonpersistent STANDBY, and waits for the sensor to confirm it.
+Lifecycle probes and transitions reuse service clients in the health node's existing ROS
+session, avoiding repeated `ros2 lifecycle` CLI startup/discovery/teardown. Its executor stays
+alive during driver cleanup even after SIGTERM stops health polling. These calls run immediately;
+`health.interval_s` and `health.poll_interval_s` do not set shutdown cadence. Each lifecycle
+request still has a five-second bound; failed requests fall through to process-group termination.
 If ROS is unreachable, bounded signal escalation still stops the process group before the
 sensor mode changes. Compose allows 120 seconds for shutdown, including up to 60 seconds
-waiting for standby. The launcher stops the container first, checks its exit status, and
+waiting for standby. These are maximum failure budgets, not fixed delays. Logs report lifecycle
+drain time, driver stop time, signal escalation, and total shutdown sequence time so driver delay
+can be distinguished from sensor parking. The launcher stops the container first, checks its exit status, and
 prints the last 40 log lines if shutdown failed, before removing it. A failed park or forced
 kill therefore makes `rig down` return nonzero. Direct `docker compose down` bypasses that
 exit-status check; its success alone does not prove sensor standby.
@@ -196,6 +203,12 @@ Regression tests run with `python3 -m unittest discover -s tests -v`. Before fie
 validate on the OS1-64/FW 2.4: boot with persisted standby, activate, repeat standby/activate,
 restart the container while parked, and power-cycle the sensor while parked. Check both reported
 state and sensor status; mock tests do not replace this hardware check.
+
+The runtime integration test uses real ROS lifecycle services when ROS is installed and verifies
+deactivate/cleanup after SIGTERM without any lifecycle CLI calls. An isolated Orin/Zenoh benchmark
+with a simulated lifecycle node measured driver stop at 3.50 seconds with CLI calls versus 0.11
+seconds with persistent clients. This excludes physical sensor parking and whole-stack teardown;
+it is not a hardware shutdown-time guarantee.
 
 The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
 `RMW_IMPLEMENTATION=rmw_zenoh_cpp` before `ouster-up` to switch. The driver never runs the Zenoh
