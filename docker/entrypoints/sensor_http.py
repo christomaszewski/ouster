@@ -54,11 +54,23 @@ class SensorHTTP:
             raise SensorError("sensor active config has no valid operating_mode")
         return info, config
 
-    def temperature(self):
-        """Read internal temperature in Celsius; older hardware may omit it."""
+    def telemetry(self):
+        """One read for independently validated temperature, voltage and current."""
         telemetry = json.loads(self.request("/telemetry", timeout=2))
         if not isinstance(telemetry, dict):
             raise SensorError("invalid sensor telemetry response")
+        return telemetry
+
+    def alerts(self):
+        """Full active set and bounded recent log; callers reconcile only valid replies."""
+        alerts = json.loads(self.request("/alerts", timeout=2))
+        if not isinstance(alerts, dict) or not isinstance(alerts.get("active"), list):
+            raise SensorError("invalid sensor alerts response")
+        return alerts
+
+    def temperature(self):
+        """Compatibility accessor; reporting uses telemetry() once for all measurements."""
+        telemetry = self.telemetry()
         value = telemetry.get("internal_temperature_deg_c")
         if value is None:
             raise SensorError("internal temperature unavailable (requires Rev 06 or newer hardware)")

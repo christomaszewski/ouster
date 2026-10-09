@@ -44,6 +44,9 @@ services:
       OUSTER_ZENOH_OVERRIDE: ${OUSTER_ZENOH_OVERRIDE:-}
       # the launcher's instance namespace, so the baked healthcheck probes ITS node
       OUSTER_NAMESPACE: ${OUSTER_NAMESPACE:-}
+      OUSTER_NAME: ${OUSTER_NAME:-ouster}
+      VEHICLE_ID: ${VEHICLE_ID:-}
+      OUSTER_HEALTH_CONFIG: ${OUSTER_HEALTH_CONFIG:-}
       OUSTER_TARGET_STATE: ${OUSTER_TARGET_STATE:-active}
       OUSTER_SHUTDOWN_STATE: ${OUSTER_SHUTDOWN_STATE:-standby}
     volumes:

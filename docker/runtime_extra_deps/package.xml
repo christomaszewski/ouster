@@ -17,6 +17,7 @@
   <exec_depend>libzip-dev</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

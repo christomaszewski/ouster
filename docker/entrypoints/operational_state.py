@@ -22,7 +22,7 @@ import time
 import yaml
 
 from sensor_http import SensorHTTP
-from temperature import temperature_monitor
+from health_ros import health_monitor
 
 LOG = logging.getLogger("ouster-state")
 SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
@@ -122,6 +122,12 @@ class Controller:
         self.lock = threading.Lock()
         self.changing = threading.Event()
         self.error = ""
+        self.sensor_info = {}
+        self.observation = {"state": "unknown", "detail": "waiting for observation", "at": self.clock()}
+
+    def health_state(self):
+        # Atomic dict replacement; never wait on transition locks or HTTP here.
+        return {**self.observation, "target": self.target, "error": self.error}
 
     def save_target(self, target):
         self.target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +150,8 @@ class Controller:
         elif self.target == "active" and lifecycle == "active" and mode == "NORMAL" and status == "RUNNING":
             state = "active"
         detail = f"target:{self.target}; lifecycle:{lifecycle}; sensor:{mode}/{status}"
+        self.sensor_info = info
+        self.observation = {"state": state, "detail": detail, "at": self.clock()}
         return {"state": state, "detail": detail}
 
     def state(self):
@@ -290,7 +298,7 @@ def load_sensor_params(params_file):
     raise ValueError(f"no sensor_hostname in {params_file}")
 
 
-def serve(*, monitor=temperature_monitor):
+def serve(*, monitor=health_monitor):
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
@@ -326,7 +334,7 @@ def serve(*, monitor=temperature_monitor):
                 controller.shutdown(shutdown_state)
 
             try:
-                with monitor(controller.sensor, namespace, params.get("sensor_frame", "os_sensor"),
+                with monitor(controller, namespace, params,
                              stop_event, controller.changing):
                     try:
                         while not stop_event.is_set():

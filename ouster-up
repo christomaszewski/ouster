@@ -76,6 +76,7 @@ esac
 export OUSTER_PARAMS_HOST="$PARAMS_HOST"
 export OUSTER_NAMESPACE="$NAMESPACE"
 export OUSTER_NAME="$NAME"
+export OUSTER_HEALTH_CONFIG="$HEALTH_CONFIG"
 export OUSTER_SHUTDOWN_STATE="$SHUTDOWN_STATE"
 
 # Opt-in zenoh session overrides, derived from the config's `zenoh:` block (SHM sugar + generic

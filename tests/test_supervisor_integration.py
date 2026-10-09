@@ -121,16 +121,19 @@ while True:
 
                 listener = context = executor = None
                 readings = []
+                diagnostics = []
                 if HAS_ROS:
                     import rclpy
                     from rclpy.context import Context
                     from rclpy.executors import SingleThreadedExecutor
                     from rclpy.signals import SignalHandlerOptions
                     from sensor_msgs.msg import Temperature
+                    from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
                     context = Context()
                     rclpy.init(args=[], context=context, signal_handler_options=SignalHandlerOptions.NO)
                     listener = rclpy.create_node("temperature_test", context=context)
                     listener.create_subscription(Temperature, "/test_ouster/temperature", readings.append, 1)
+                    listener.create_subscription(DiagnosticArray, "/diagnostics", diagnostics.append, 10)
                     executor = SingleThreadedExecutor(context=context)
                     executor.add_node(listener)
 
@@ -150,13 +153,34 @@ while True:
                             stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
                             self.assertLess(abs(time.time() - stamp), 3, "stamp must be host receipt time")
                             return
-                    self.fail(f"no temperature {value}; received: {readings}")
+                    log.flush()
+                    log.seek(0)
+                    self.fail(f"no temperature {value}; received: {readings}; supervisor: {log.read()}")
+
+                def wait_diagnostics(predicate):
+                    if listener is None:
+                        return
+                    diagnostics.clear()
+                    deadline = time.monotonic() + 12
+                    while time.monotonic() < deadline:
+                        executor.spin_once(timeout_sec=0.1)
+                        if diagnostics and predicate({s.name.split(": ", 1)[1]: s for s in diagnostics[-1].status}):
+                            return
+                    self.fail(f"no expected diagnostics; received: {diagnostics[-1:]}")
 
                 try:
                     with patch.object(operational, "SOCKET", socket_path):
                         process = start()
                         wait_state("standby")
                         wait_temperature(45.0)
+                        with sensor.lock:
+                            firmware.telemetry.update(input_voltage_mv=23606, input_current_ma=758)
+                            firmware.alerts = {"active": [{"id": "POWER_LOW", "level": "ERROR", "msg": "input low"}], "log": [], "next_cursor": 1}
+                        wait_diagnostics(lambda rows: rows.get("alert/POWER_LOW") is not None and rows["alert/POWER_LOW"].level == DiagnosticStatus.ERROR and
+                                         dict((v.key, v.value) for v in rows["power"].values).get("supply.power_w") == "17.893348")
+                        with sensor.lock:
+                            firmware.alerts["active"] = []
+                        wait_diagnostics(lambda rows: rows.get("alert/POWER_LOW") is not None and rows["alert/POWER_LOW"].level == DiagnosticStatus.OK)
                         self.assertFalse(starts.exists(), "standby boot launched the driver")
                         health = subprocess.run([str(entrypoints / "healthcheck.sh")], env=env,
                                                 capture_output=True, text=True, timeout=20)

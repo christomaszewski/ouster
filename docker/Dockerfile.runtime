@@ -176,7 +176,7 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
-COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/temperature.py /usr/local/bin/
+COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/temperature.py docker/entrypoints/health.py docker/entrypoints/health_ros.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
