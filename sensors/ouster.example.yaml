@@ -1,85 +1,187 @@
-# Example rig sensor config for the ouster driver (a thin wrap of upstream ouster-ros). Copy +
-# rename per instance (e.g. sensors/ouster_top.yaml), edit for your vehicle, then:
-#   ./ouster-up sensors/ouster_top.yaml up -d
-# This is also the config CI's `rig certify` job runs against (the launcher-contract gate).
-#
-# `connection` is the generic, rig-uniform block; tools/render_params.py maps it onto upstream's
-# flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). `driver_params` is
-# copied VERBATIM into the node's ros__parameters (ANY key from upstream config/driver_params.yaml)
-# — do NOT put connection keys there; they are derived from `connection`.
+# Ouster rig service config: wrapper settings plus upstream ROS driver parameters.
+# Copy per sensor instance, then invoke: ./ouster-up sensors/ouster_top.yaml up -d
+# Wrapper schema: tools/render_params.py. Driver reference is pinned by ouster.repos (0.15.1):
+# https://github.com/ouster-lidar/ouster-ros/blob/0.15.1/ouster-ros/config/driver_params.yaml
+# Defaults here were checked against os_sensor_node.cpp, os_driver_node.cpp and the static TF
+# broadcaster as well as that reference; the wrapper does NOT load upstream's example YAML.
+# Active values below are this instance's choices. Commented driver settings show node defaults,
+# unless marked as an illustration. Firmware/model support still determines which values work.
 
 service: ouster
-name: top                       # instance id -> ROS namespace /top; compose project ouster_top (standalone)
+name: top                       # rig instance / health identity; standalone project ouster_top
+# service/name/ros.namespace must match [a-z][a-z0-9_]*. Rig can supply name from vehicle.yaml.
 
-# Initial state for a new container; RIG_TARGET_STATE overrides this at up.
-# Standby stops the driver process and physically parks the sensor (motor/laser off).
-# The container remains healthy while sensor status/config confirm standby; the ROS
-# driver node is absent. Activation wakes the sensor before launching the driver.
-# Runtime requests survive container restarts. Use the launcher/rig state verbs;
-# direct ROS lifecycle commands do not change the supervisor's target.
-# initial_state: standby
+# up target: RIG_TARGET_STATE > initial_state > active. Choices: active | standby.
+# Standby physically parks the sensor and stops the ROS driver; the health node remains alive.
+# Target changes persist across Docker restarts. Use rig/launcher standby, activate and state;
+# direct ROS lifecycle commands do not update the supervisor's target.
+# initial_state: standby         # opt-in parked startup; omitted = active
 
-# On rig down / Docker stop / Ctrl-C: stop ROS cleanly, then park the sensor.
-# "unchanged" stops ROS without changing the sensor's operating mode.
-# Applied when creating the container; independent of initial_state/runtime target.
+# Shutdown policy: standby (default) | unchanged. On rig down / Docker stop / Ctrl-C, stop ROS,
+# then park the sensor unless unchanged was selected. Independent of the runtime/startup target.
 shutdown_state: standby
 
 connection:
-  type: lidar
+  type: lidar                  # only supported transport (also the default)
   lidar:
-    sensor_hostname: 192.168.1.50   # REQUIRED: the Ouster sensor's IP or hostname
-    udp_dest: 192.168.1.10          # this host's NIC the sensor streams to (omit to auto-detect)
-    lidar_port: 7502                # host UDP port for lidar packets (rig doctor checks for clashes)
-    imu_port: 7503                  # host UDP port for imu packets   (rig doctor checks for clashes)
+    sensor_hostname: 192.168.1.50 # required sensor hostname/IP; used by ROS and HTTP health polling
+    udp_dest: 192.168.1.10     # receiving host/interface, or multicast group; omit/empty = autodetect
+    lidar_port: 7502            # UDP 0..65535; upstream default 0 chooses an available port
+    imu_port: 7503              # use distinct explicit ports for multiple sensors on one host
 
 ros:
-  namespace: top                # -> ouster_ns:=top -> /top/points, /top/imu, ...
+  namespace: top                # defaults to name; /<namespace>/points, /imu, /temperature, etc.
+# ROS namespace may differ from deployment name. /diagnostics is shared; health metadata uses
+# VEHICLE_ID + deployment name so dashboard grouping does not depend on the ROS namespace.
 
-driver_params:                  # verbatim ros__parameters overrides; keys from upstream config/driver_params.yaml
-  lidar_mode: "1024x10"         # 512x10 | 512x20 | 1024x10 | 1024x20 | 2048x10 | 4096x5
-  timestamp_mode: TIME_FROM_INTERNAL_OSC
-  udp_profile_lidar: RNG19_RFL8_SIG16_NIR16
-  point_type: original
-  sensor_frame: ouster_sensor   # upstream defaults are os_sensor / os_lidar / os_imu
-                               # also used by /<ns>/temperature (Celsius, every 5s when available;
-                               # HTTP telemetry requires Rev 06+ for temperature, including standby)
-  lidar_frame: ouster_lidar
-  imu_frame: ouster_imu
-  point_cloud_frame: ouster_lidar   # frame clouds/scans are stamped in; must EQUAL the value of
-                                    # lidar_frame or sensor_frame, so rename it TOGETHER with them
-                                    # (unset -> follows lidar_frame; mismatch -> warn + lidar_frame)
-  attempt_reconnect: true       # reconnect after a sensor power-cycle / link loss
-  # proc_mask: IMU|PCL|SCAN|IMG|RAW|TLM   # node default; which processors/topics run. TLM =
-  #                                       # ouster_sensor_msgs/Telemetry on /<ns>/telemetry
-  #                                       # (thermal-shutdown + shot-limiting status/countdowns,
-  #                                       # per lidar packet -> silent in standby). Drop tokens
-  #                                       # to trim topics/bandwidth; keep the default otherwise.
+# Verbatim ROS parameters for the combined os_driver node. Connection-derived fields are merged
+# first, driver_params wins on duplicates; keep connection fields above as the source of truth.
+# Empty strings / sentinel values below usually leave the sensor setting unchanged; other node
+# defaults may configure it even when omitted. No arbitrary top-level YAML keys become ROS params.
+driver_params:
+  # Acquisition / packet formats ---------------------------------------------------------------
+  lidar_mode: "1024x10"         # default "" keeps sensor mode; 512x10/20, 1024x10/20, 2048x10, 4096x5
+  timestamp_mode: TIME_FROM_INTERNAL_OSC # default ""; alternatives TIME_FROM_SYNC_PULSE_IN,
+                                        # TIME_FROM_PTP_1588, TIME_FROM_ROS_TIME (host receipt time)
+  udp_profile_lidar: RNG19_RFL8_SIG16_NIR16 # default "" keeps profile; firmware/model dependent
+  # Other profiles: LEGACY, RNG15_RFL8_NIR8, RNG19_RFL8_SIG16_NIR16_DUAL,
+  # RNG15_RFL8_NIR8_DUAL (old alias FUSA_RNG15_RFL8_NIR8_DUAL), RNG15_RFL8_WIN8,
+  # RNG15_RFL8_NIR8_ZONE16, RNG19_RFL8_SIG16_NIR16_ZONE16 (FW 3.2+ for the newer profiles),
+  # RNG19_RFL8_SIG16_NIR16_RGB16 / RNG19_RFL8_SIG16_NIR16_RGB16_DUAL (FW 4.0+).
+  # columns_per_packet: 0        # 0 = unset; otherwise 1/2/4/8/16/32/64; FW 4.0+
+  # udp_profile_imu: ""          # unchanged; LEGACY | ACCEL32_GYRO32_NMEA (latter FW 3.2+)
+  # imu_packets_per_frame: 0     # 0 = unset; otherwise 1/2/4/8; FW 3.2+
+  # gyro_fsr: ""                # unchanged; NORMAL | EXTENDED; FW 3.1+
+  # accel_fsr: ""               # unchanged; NORMAL | EXTENDED; FW 3.1+
+  # azimuth_window_start: 0      # millidegrees, 0..360000
+  # azimuth_window_end: 360000   # millidegrees, 0..360000
+  # signal_multiplier: 1.0      # 0.25 | 0.5 | 1 | 2 | 3; sensor/firmware constraints apply
+  # lidar_frame_azimuth_offset: -1 # -1 = unset; otherwise 0..360000 millidegrees; FW 3.2+
+  # return_order: ""            # unchanged; STRONGEST_TO_WEAKEST | FARTHEST_TO_NEAREST |
+                                # NEAREST_TO_FARTHEST; FW 3.1+
+  # bloom_reduction_optimization: "" # unchanged; BALANCED | MINIMIZE_FALSE_POSITIVES; FW 3.2+
+  # min_distance: -1            # sensor-side near cutoff in cm; -1 = unset; 0/30 (FW 3.1+), 50 (3.2+)
+  # persist_config: false       # true writes acquisition settings to sensor nonvolatile storage
 
-# Zenoh session tweaks (rmw_zenoh only, RMW_IMPLEMENTATION=rmw_zenoh_cpp; inert under the default
-# Fast DDS). Same knob shape as the rig-infra ros2-bag-logger — keep the fleet's zenoh knobs in
-# sync. Rendered into one ZENOH_CONFIG_OVERRIDE export — rmw_zenoh applies the pairs ON TOP of
-# the session config it loads (its shipped ROS default, or your ZENOH_SESSION_CONFIG_URI file),
-# so untouched keys keep their ROS-tuned values. (Semantics change vs v0.1.2: the knob used to be
-# SKIPPED when the deployment set ZENOH_SESSION_CONFIG_URI; now the pairs apply on top of that
-# file too.) A bad key is a WARN in the driver log and ignored, so check `logs` after changes.
-# Shared memory ships DISABLED in rmw_zenoh and engages per link only where the SUBSCRIBER's
-# session also opted in (the bag logger has the identical knob) AND both containers share the
-# host IPC namespace (this driver's compose sets ipc: host; the subscriber's must too) — anything
-# unmet = silent per-link fallback to TCP loopback, so verify by watching `lo` traffic (the
-# /<ns>/points bytes vanish when SHM engages), not by reading configs. Keep every SHM participant
-# on the same distro's zenoh.
+  # Frames, outputs and point clouds -----------------------------------------------------------
+  sensor_frame: ouster_sensor   # node default os_sensor; also the HTTP temperature message frame
+  lidar_frame: ouster_lidar     # node default os_lidar
+  imu_frame: ouster_imu         # node default os_imu
+  point_cloud_frame: ouster_lidar # node default "" follows lidar_frame; must equal lidar_frame
+                                  # or sensor_frame. Invalid choice warns and falls back to lidar_frame.
+  # pub_static_tf: true         # publish sensor/lidar/IMU transforms; false for an external TF source
+  # proc_mask: IMU|PCL|SCAN|IMG|RAW|TLM # enable processors with these pipe-separated tokens
+  # TLM publishes per-packet /<ns>/telemetry (thermal/shot-limiting state). It is silent in standby.
+  # Health uses TLM arrivals to detect missing streaming when active; dropping TLM disables that
+  # stream check, but HTTP temperature/power/alerts and /diagnostics continue independently.
+  # scan_ring: 0                # beam used for LaserScan (SCAN); 0..sensor beam count - 1
+  # use_system_default_qos: false # false = sensor-data QoS; true = ROS system-default QoS
+  point_type: original          # original | native | xyz | xyzi | o_xyzi | xyzir |
+                                # xyzrgb | xyzrgba | color_point. Match fields to the packet profile.
+  # organized: true             # retain the 2-D beam/column organization
+  # destagger: true             # align point-cloud columns across beams
+  # min_range: 0.0              # point-cloud filtering, metres (not sensor-side min_distance)
+  # max_range: 1000.0           # metres; must exceed min_range
+  # v_reduction: 1              # keep one in every 1/2/4/8/16 vertical beams
+  # min_scan_valid_columns_ratio: 0.0 # 0..1; reject scans below this usable-column fraction
+  # mask_path: ""               # optional mask image path INSIDE the container; provide file/mount
+  # metadata: ""                # empty writes ~/.ros/<sensor hostname>_metadata.json
+  # The wrapper mounts a persistent per-instance metadata volume at /root/.ros. A custom path
+  # needs to exist/be writable inside the container; arbitrary host paths are not auto-mounted.
+
+  # Time synchronization / phase lock ----------------------------------------------------------
+  # ptp_utc_tai_offset: -37.0    # seconds applied for TIME_FROM_PTP_1588; node default, verify for setup
+  # multipurpose_io_mode: "OFF" # OFF | INPUT_NMEA_UART | OUTPUT_FROM_INTERNAL_OSC |
+                                # OUTPUT_FROM_SYNC_PULSE_IN | OUTPUT_FROM_PTP_1588 | OUTPUT_FROM_ENCODER_ANGLE
+  # phase_lock_enable: false
+  # phase_lock_offset: 0        # millidegrees, 0..360000
+  # nmea_in_polarity: ACTIVE_HIGH # ACTIVE_HIGH | ACTIVE_LOW
+  # nmea_ignore_valid_char: false # true permits time sync from NMEA sentences without a valid flag
+  # nmea_baud_rate: BAUD_9600    # BAUD_9600 | BAUD_115200
+  # nmea_leap_seconds: 0        # integer seconds added to NMEA-derived epoch time
+  # sync_pulse_in_polarity: ACTIVE_HIGH  # ACTIVE_HIGH | ACTIVE_LOW
+  # sync_pulse_out_polarity: ACTIVE_LOW  # ACTIVE_HIGH | ACTIVE_LOW
+  # sync_pulse_out_frequency: -1 # -1 = unchanged; otherwise positive Hz, subject to firmware limits
+  # sync_pulse_out_angle: -1     # -1 = unchanged; rotation degrees per output pulse
+  # sync_pulse_out_pulse_width: -1 # -1 = unchanged; output pulse width in ms
+
+  # Recovery / multicast ----------------------------------------------------------------------
+  attempt_reconnect: true       # instance choice; node default false
+  # dormant_period_between_reconnects: 1.0 # seconds between attempts
+  # max_failed_reconnect_attempts: 2147483647 # counter resets on successful reconnect
+  # mtp_dest: ""                # multicast receiver interface IP; empty = any interface
+  # mtp_main: false             # multicast: true configures sensor, false uses its active config
+
+  # Other declared parameters / wrapper constraints --------------------------------------------
+  # auto_start: false           # node-level self-start option; wrapper launch already drives lifecycle
+  # operating_mode: ""          # only omit/empty/NORMAL allowed HERE; use initial_state for standby
+  # lidar_ip: ""                # legacy sensor_hostname alias; use connection.lidar.sensor_hostname
+  # computer_ip: ""             # legacy udp_dest alias; use connection.lidar.udp_dest
+  # sensor_hostname / udp_dest / lidar_port / imu_port also exist as driver parameters; their
+  # supported rig spelling, types and defaults are documented in connection.lidar above.
+  # use_sim_time: false          # ROS common parameter; health timestamps remain system time
+
+# Health reporting runs by default, independently of the driver's active/standby lifecycle.
+# /diagnostics uses standard diagnostic_msgs/DiagnosticArray; /<ns>/temperature is also retained.
+# Bounded HTTP reads poll sensor telemetry and active/recent alerts. Voltage/current are converted
+# to V/A; power is their same-poll product in W. Unsupported temperature is omitted from the compact
+# dashboard; unavailable readings never become zero. Vendor error codes/text are preserved.
+# There is no health.enabled/topic/remapping option in this wrapper's YAML schema.
+#
+# health:
+#   interval_s: 1               # diagnostic heartbeat period; positive finite seconds
+#   poll_interval_s: 5          # delay between HTTP collection cycles; positive finite seconds
+#   stale_after_s: 15           # observation validity; allow polling + bounded request time
+#   limits: {}                  # default: no additional thresholds; sensor alerts still apply
+#   # Replace {} with a mapping like the following. Numbers are ILLUSTRATIVE, not sensor ratings.
+#   # Use metric units and choose limits for the installed sensor. Any subset of four bounds is
+#   # supported per numeric metric; strict >/< comparisons, ERROR wins over WARN. These affect
+#   # reported/recorded diagnostics (dashboard-only display thresholds use err_*, not error_*).
+#   # limits:
+#   #   temp.internal_c:         # degrees Celsius
+#   #     warn_above: 60
+#   #     error_above: 70
+#   #     warn_below: 0
+#   #     error_below: -10
+#   #   supply.voltage_v: {warn_below: 22.0, error_below: 20.0}
+#   #   supply.current_a: {warn_above: 1.5, error_above: 2.0}
+#   #   supply.power_w: {warn_above: 30.0, error_above: 40.0}
+# All health timing/limit values must be finite numbers (not strings/bools). Unknown setting or
+# bound names are rejected. A metric that is absent/non-numeric cannot be thresholded.
+
+# Zenoh session settings (only consumed with RMW_IMPLEMENTATION=rmw_zenoh_cpp).
+# They become leaf path=json overrides applied after the incoming ZENOH_CONFIG_OVERRIDE value.
+# Generic overrides apply last and beat the sugar below. Unknown top-level zenoh keys are errors;
+# unknown underlying Zenoh paths are diagnosed by rmw_zenoh, so check the runtime log.
+# SHM also requires subscribers to enable it, share host IPC, and use compatible Zenoh versions.
+# Missing conditions can fall back to TCP; this compose already uses ipc: host and unlimited memlock.
+#
 # zenoh:
-#   shared_memory: true         # sugar for transport/shared_memory/enabled=true
-#   shm_pool_mb: 256            # sugar for …/transport_optimization/pool_size — sizes the SHM
-#                               # pool for what THIS session publishes, and the driver publishes
-#                               # the big /<ns>/points clouds, so this is where pool sizing
-#                               # matters: size it >= subscriber QoS depth x expanded cloud size
-#                               # (rmw default 48 MB holds only ~8-16 clouds; a full pool falls
-#                               # back to TCP per message). 256 is the recommended floor here;
-#                               # omit to keep the shipped default. Ignored (with a warning)
-#                               # unless shared_memory is true. Never set the ZENOH_SHM_ALLOC_SIZE
-#                               # env instead — it aliases the same key and silently overrides
-#                               # this knob.
-#   overrides:                  # any zenoh session-config subtree, flattened to leaf overrides
-#     transport:                # and applied LAST (wins over the sugar above on conflict)
-#       link: { tx: { batch_size: 16384 } }
+#   shared_memory: true         # example opt-in; omit/false does not enable SHM via this sugar
+#   shm_pool_mb: 256            # positive integer MiB; only applied with shared_memory: true
+#                               # omit = loaded Zenoh default; ignored with a warning if SHM not enabled
+#                               # size for this publisher's cloud bytes x subscriber QoS depth
+#   overrides:                  # arbitrary nested Zenoh config, flattened to path=json pairs
+#     connect:
+#       endpoints: ["tcp/localhost:7447"] # example explicit router (default ROS session uses localhost)
+#     transport:
+#       link: {tx: {batch_size: 16384}} # example tuning, not a required/recommended override
+# Scalars, lists and nested mappings are accepted under overrides; ';' in paths/values is rejected
+# because ZENOH_CONFIG_OVERRIDE uses semicolon separators. shared_memory: false does not force off
+# an earlier session setting; explicitly override transport.shared_memory.enabled: false to do so.
+# Do not also set ZENOH_SHM_ALLOC_SIZE: it aliases pool_size and can override shm_pool_mb.
+
+# Deployment/launcher environment (NOT additional instance-YAML fields):
+#   VEHICLE_ID                  same vehicle identity as dashboard/camera-service (rig supplies it)
+#   ROS_DOMAIN_ID               default 0; set consistently across producers and recording
+#   RMW_IMPLEMENTATION          default rmw_fastrtps_cpp; rmw_zenoh_cpp for native Zenoh routing
+#   ZENOH_CONFIG_OVERRIDE       optional path=json;... pairs, e.g. connect/endpoints=["tcp/host:7447"]
+#   RIG_TARGET_STATE            optional up target, active | standby, overrides initial_state
+#   OUSTER_IMAGE                full image override; else [RIG_IMAGE_REGISTRY/]ouster_driver:RIG_IMAGE_TAG
+#   RIG_IMAGE_TAG               defaults to latest; RIG_IMAGE_REGISTRY defaults to no prefix
+#   COMPOSE_PROJECT_NAME        rig-supplied project; standalone defaults to service_name
+#   OUSTER_PYTHON               launcher Python interpreter (default python3; requires PyYAML)
+#   OUSTER_SETTLE_TIMEOUT       detached up convergence timeout (seconds, default 300);
+#                              OUSTER_STANDBY_SETTLE_TIMEOUT is its legacy fallback alias
+# Identity, parameter paths and OUSTER_HEALTH_CONFIG are generated by the launcher from this YAML.
+# The wrapper starts no Zenoh router. Supply a router/bridge externally for dashboard ROS discovery.

@@ -22,7 +22,7 @@ import time
 import yaml
 
 from sensor_http import SensorHTTP
-from temperature import temperature_monitor
+from health_ros import health_monitor
 
 LOG = logging.getLogger("ouster-state")
 SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
@@ -36,6 +36,7 @@ class Driver:
                         f"params_file:={params_file}", f"ouster_ns:={namespace}", "viz:=false"]
         self.node = namespace.rstrip("/") + "/os_driver"
         self.process = None
+        self.lifecycle_client = None
 
     def running(self):
         return self.process is not None and self.process.poll() is None
@@ -43,6 +44,12 @@ class Driver:
     def lifecycle(self):
         if not self.running():
             return "absent"
+        if self.lifecycle_client is not None:
+            try:
+                return self.lifecycle_client.state()
+            except Exception:
+                return "unreachable"
+        # Fallback for a missing ROS monitor (including bare-host tests).
         try:
             result = subprocess.run(
                 ["ros2", "lifecycle", "get", self.node], capture_output=True,
@@ -67,6 +74,7 @@ class Driver:
     def stop(self):
         if self.process is None:
             return
+        started = time.monotonic()
         # Drain both the UDP reader (deactivate) and scan-processing thread
         # (cleanup) while the ROS context is still usable. SIGINT alone closes
         # Zenoh before these threads finish publishing and can abort os_driver.
@@ -76,16 +84,23 @@ class Driver:
                 transitions = {"active": ("deactivate", "cleanup"),
                                "inactive": ("cleanup",)}.get(state, ())
                 for transition in transitions:
-                    subprocess.run(
-                        ["ros2", "lifecycle", "set", self.node, transition],
-                        capture_output=True, text=True, timeout=5, check=True,
-                    )
-            except (OSError, subprocess.SubprocessError) as error:
+                    if self.lifecycle_client is not None:
+                        self.lifecycle_client.transition(transition)
+                    else:
+                        subprocess.run(
+                            ["ros2", "lifecycle", "set", self.node, transition],
+                            capture_output=True, text=True, timeout=5, check=True,
+                        )
+                LOG.info("driver lifecycle drain (%s) finished in %.2fs", state,
+                         time.monotonic() - started)
+            except Exception as error:
                 LOG.warning("driver lifecycle cleanup unavailable; stopping process group: %s", error)
         # Kill/wait for the entire launch process group, even if its leader has
         # already exited. No upstream config writer may survive into standby.
         pgid = self.process.pid
         for sig, budget in ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 4)):
+            if sig != signal.SIGINT:
+                LOG.warning("driver process group still running; sending %s", sig.name)
             try:
                 os.killpg(pgid, sig)
             except ProcessLookupError:
@@ -98,12 +113,14 @@ class Driver:
                 except ProcessLookupError:
                     self.process.wait()
                     self.process = None
+                    LOG.info("driver stopped in %.2fs", time.monotonic() - started)
                     return
                 time.sleep(0.1)
         else:
             raise RuntimeError("driver process group did not stop; sensor mode unchanged")
         self.process.wait()
         self.process = None
+        LOG.info("driver stopped in %.2fs", time.monotonic() - started)
 
 
 class Controller:
@@ -122,6 +139,12 @@ class Controller:
         self.lock = threading.Lock()
         self.changing = threading.Event()
         self.error = ""
+        self.sensor_info = {}
+        self.observation = {"state": "unknown", "detail": "waiting for observation", "at": self.clock()}
+
+    def health_state(self):
+        # Atomic dict replacement; never wait on transition locks or HTTP here.
+        return {**self.observation, "target": self.target, "error": self.error}
 
     def save_target(self, target):
         self.target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +167,8 @@ class Controller:
         elif self.target == "active" and lifecycle == "active" and mode == "NORMAL" and status == "RUNNING":
             state = "active"
         detail = f"target:{self.target}; lifecycle:{lifecycle}; sensor:{mode}/{status}"
+        self.sensor_info = info
+        self.observation = {"state": state, "detail": detail, "at": self.clock()}
         return {"state": state, "detail": detail}
 
     def state(self):
@@ -227,6 +252,8 @@ class Controller:
             raise ValueError("shutdown state must be standby or unchanged")
         self.stop_event.set()
         self.changing.set()
+        started = self.clock()
+        LOG.info("shutdown: stopping driver (sensor policy:%s)", target)
         # Leave margin inside Compose's 120-second stop grace period. An
         # interrupted transition can still be reaping the driver process group.
         deadline = self.clock() + 100
@@ -250,6 +277,7 @@ class Controller:
             raise
         finally:
             self.lock.release()
+            LOG.info("shutdown sequence finished in %.2fs", self.clock() - started)
 
 
 class Server(socketserver.ThreadingUnixStreamServer):
@@ -290,7 +318,7 @@ def load_sensor_params(params_file):
     raise ValueError(f"no sensor_hostname in {params_file}")
 
 
-def serve(*, monitor=temperature_monitor):
+def serve(*, monitor=health_monitor):
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
@@ -326,7 +354,7 @@ def serve(*, monitor=temperature_monitor):
                 controller.shutdown(shutdown_state)
 
             try:
-                with monitor(controller.sensor, namespace, params.get("sensor_frame", "os_sensor"),
+                with monitor(controller, namespace, params,
                              stop_event, controller.changing):
                     try:
                         while not stop_event.is_set():

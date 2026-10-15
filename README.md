@@ -87,7 +87,7 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
 ### Temperature and thermal status
 
 The wrapper publishes **`/<ns>/temperature`** as `sensor_msgs/msg/Temperature` from the
-`/<ns>/sensor_temperature` node. It reads `internal_temperature_deg_c` with a read-only
+`/<ns>/sensor_health` node. It reads `internal_temperature_deg_c` with a read-only
 `GET /api/v1/sensor/telemetry` about every **5 seconds**, in both active and standby states.
 It pauses polling during mode transitions and resumes afterward, independently of the
 driver's `proc_mask`.
@@ -166,9 +166,16 @@ the sensor is parked again when reachable.
 The supervisor first requests lifecycle `deactivate` and `cleanup`, which drain upstream's
 UDP and scan-processing threads before ROS/Zenoh closes. It then stops and reaps the entire
 driver process group, applies nonpersistent STANDBY, and waits for the sensor to confirm it.
+Lifecycle probes and transitions reuse service clients in the health node's existing ROS
+session, avoiding repeated `ros2 lifecycle` CLI startup/discovery/teardown. Its executor stays
+alive during driver cleanup even after SIGTERM stops health polling. These calls run immediately;
+`health.interval_s` and `health.poll_interval_s` do not set shutdown cadence. Each lifecycle
+request still has a five-second bound; failed requests fall through to process-group termination.
 If ROS is unreachable, bounded signal escalation still stops the process group before the
 sensor mode changes. Compose allows 120 seconds for shutdown, including up to 60 seconds
-waiting for standby. The launcher stops the container first, checks its exit status, and
+waiting for standby. These are maximum failure budgets, not fixed delays. Logs report lifecycle
+drain time, driver stop time, signal escalation, and total shutdown sequence time so driver delay
+can be distinguished from sensor parking. The launcher stops the container first, checks its exit status, and
 prints the last 40 log lines if shutdown failed, before removing it. A failed park or forced
 kill therefore makes `rig down` return nonzero. Direct `docker compose down` bypasses that
 exit-status check; its success alone does not prove sensor standby.
@@ -196,6 +203,12 @@ Regression tests run with `python3 -m unittest discover -s tests -v`. Before fie
 validate on the OS1-64/FW 2.4: boot with persisted standby, activate, repeat standby/activate,
 restart the container while parked, and power-cycle the sensor while parked. Check both reported
 state and sensor status; mock tests do not replace this hardware check.
+
+The runtime integration test uses real ROS lifecycle services when ROS is installed and verifies
+deactivate/cleanup after SIGTERM without any lifecycle CLI calls. An isolated Orin/Zenoh benchmark
+with a simulated lifecycle node measured driver stop at 3.50 seconds with CLI calls versus 0.11
+seconds with persistent clients. This excludes physical sensor parking and whole-stack teardown;
+it is not a hardware shutdown-time guarantee.
 
 The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
 `RMW_IMPLEMENTATION=rmw_zenoh_cpp` before `ouster-up` to switch. The driver never runs the Zenoh
@@ -253,3 +266,17 @@ Release tags must be exact `vX.Y.Z`.
 
 [Apache 2.0](LICENSE) for this wrapper. Upstream `ouster-ros` ships under its own license, fetched
 with the source at build time.
+
+## Standard service health
+
+The supervisor publishes standard `diagnostic_msgs/msg/DiagnosticArray` on `/diagnostics`,
+including operation, stream availability, temperature, input voltage/current/power and
+sensor alerts. It polls read-only `/api/v1/sensor/telemetry` and `/api/v1/sensor/alerts` even
+in standby, while skipping transitions. Power is input mV × mA / 1,000,000 watts; unavailable
+readings are not zero. The existing temperature topic remains available.
+
+Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
+(default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,
+use the deployment's rmw_zenoh router or supported DDS bridge. See the complete
+[shared health specification](docs/SERVICE_HEALTH.md) for adoption, alert history,
+configuration, tests and remaining hardware validation.

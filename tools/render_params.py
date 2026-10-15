@@ -29,6 +29,7 @@ pushes via `ouster_ns`. (Upstream's own driver_params.yaml keys the explicit nod
 Needs PyYAML on the host (apt: python3-yaml).
 """
 import json
+import math
 import re
 import shlex
 import sys
@@ -166,6 +167,30 @@ def main() -> int:
     ttype = str(connection.get("type") or "lidar")
     namespace = require_ident("ros.namespace", str((cfg.get("ros") or {}).get("namespace") or name))
     zenoh_pairs, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
+    health = cfg.get("health", {})
+    if not isinstance(health, dict):
+        sys.stderr.write("render_params: health must be a mapping\n")
+        return 2
+    # Fail before starting/replacing a container. Runtime validates these again.
+    try:
+        if set(health) - {"interval_s", "poll_interval_s", "stale_after_s", "limits"}:
+            raise ValueError("unknown health setting")
+        for key in ("interval_s", "poll_interval_s", "stale_after_s"):
+            value = health.get(key, 1)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"health.{key} must be positive and finite")
+        limits = health.get("limits", {})
+        if not isinstance(limits, dict):
+            raise ValueError("health.limits must be a mapping")
+        for metric, bounds in limits.items():
+            if not isinstance(bounds, dict):
+                raise ValueError(f"health.limits.{metric} must be a mapping")
+            for key, value in bounds.items():
+                if key not in ("warn_above", "warn_below", "error_above", "error_below") or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError(f"invalid health.limits.{metric}.{key}")
+    except ValueError as error:
+        sys.stderr.write(f"render_params: {error}\n")
+        return 2
 
     # Operational-state contract: the state `up` leaves the instance in. Absent = active
     # (existing configs untouched); the launcher applies the RIG_TARGET_STATE > initial_state
@@ -195,6 +220,7 @@ def main() -> int:
                  "TYPE=" + shlex.quote(ttype),
                  f"INITIAL_STATE={initial_state}",
                  f"SHUTDOWN_STATE={shutdown_state}",
+                 "HEALTH_CONFIG=" + shlex.quote(json.dumps(health, allow_nan=False)),
                  "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs)]
         print("\n".join(lines))
         return 0

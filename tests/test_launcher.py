@@ -25,6 +25,7 @@ class LauncherTests(unittest.TestCase):
         docker.write_text('''#!/usr/bin/env bash
 echo "${OUSTER_TARGET_STATE:-unset} docker $*" >> "$ARGV_LOG"
 echo "shutdown=${OUSTER_SHUTDOWN_STATE:-unset}" >> "$ARGV_LOG"
+echo "health=${OUSTER_HEALTH_CONFIG:-unset}" >> "$ARGV_LOG"
 case "$*" in
   "compose version") exit 0 ;;
   "inspect --format"*) echo "${STOP_EXIT_CODE:-0}" ;;
@@ -133,6 +134,21 @@ exit 0
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("shutdown_state", result.stderr)
         self.assertNotIn("volume create", self.log.read_text())
+        self.assertNotIn(" up", self.log.read_text())
+
+    def test_health_config_reaches_runtime_without_becoming_a_ros_parameter(self):
+        self.config.write_text(self.config.read_text() + "\nhealth: {poll_interval_s: 7, limits: {supply.power_w: {warn_above: 30}}}\n")
+        result = self.run_launcher("config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"poll_interval_s": 7', self.log.read_text())
+        for params in (self.root / "var/run").glob("*.yaml"):
+            self.assertNotIn("poll_interval_s", params.read_text())
+
+    def test_invalid_health_config_never_starts_a_container(self):
+        self.config.write_text(self.config.read_text() + "\nhealth: {poll_interval_s: 0}\n")
+        result = self.run_launcher("up", "-d")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("health.poll_interval_s", result.stderr)
         self.assertNotIn(" up", self.log.read_text())
 
     def test_inspection_and_teardown_never_render_or_damage_params(self):
