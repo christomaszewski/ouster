@@ -31,6 +31,13 @@ examples:
 build:
   command: tools/build_image.sh
   images: [ouster_driver]
+  architectures: [arm64, amd64]
+  capabilities: {no_cache: true, platforms: true}
+
+# One CPU runtime per architecture; no JetPack-specific variants. Rig injects the
+# catalog digest through the same full-image override the deploy compose already uses.
+images:
+  override_env: {ouster_driver: OUSTER_IMAGE}
 
 # Interface packages this service's published types come from — consumed (by rig ≥ v0.2.28, or a
 # hand-authored union manifest) to build the deployment's fleet-ros-msgs overlay so the shared bag
