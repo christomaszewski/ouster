@@ -13,21 +13,27 @@
 #   ROS_DISTRO          fleet distro (vehicle.yaml ros.distro); default lyrical.
 #   RIG_BASE_IMAGE      the deployment's one runtime base image (fleet-ros), forwarded to every
 #                       dependent build; empty/absent falls back to the standalone ros-core parent.
+#   RIG_BUILD_PLATFORMS comma-separated Docker platforms; buildx publishes one image index.
+#   RIG_BUILD_RESULT    optional JSONL path for the published image/index digest.
 #
 # A plain-HTTP local registry needs the daemon's insecure-registries on this host (with the :port).
 # Cross-arch vehicle: export OUSTER_BUILD_PLATFORM=linux/<arch> (default: host-native). The heavy
 # C++/PCL/SDK compile is slow under qemu — prefer a native arm64 host/runner for Jetson images.
+# RIG_BUILD_PLATFORMS takes precedence over OUSTER_BUILD_PLATFORM under rig.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=tools/rig-build.sh
+. "$REPO/tools/rig-build.sh"
 
 REGISTRY="${1:?usage: build_image.sh <registry> [tag]}"
 TAG="${2:-latest}"
 IMAGE="${REGISTRY}/ouster_driver:${TAG}"
 
-docker build ${OUSTER_BUILD_PLATFORM:+--platform "${OUSTER_BUILD_PLATFORM}"} \
-  ${RIG_BUILD_NO_CACHE:+--no-cache} ${RIG_BUILD_NO_CACHE:+--pull} \
+set --
+if [ -z "${RIG_BUILD_PLATFORMS:-}" ] && [ -n "${OUSTER_BUILD_PLATFORM:-}" ]; then
+  set -- --platform "$OUSTER_BUILD_PLATFORM"
+fi
+rig_build "$IMAGE" "$@" \
   --build-arg "ROS_DISTRO=${ROS_DISTRO:-lyrical}" \
   --build-arg "BASE_IMAGE=${RIG_BASE_IMAGE:-ros:${ROS_DISTRO:-lyrical}-ros-core}" \
-  -f "$REPO/docker/Dockerfile.runtime" -t "$IMAGE" "$REPO"
-docker push "$IMAGE"
-echo "build_image.sh: pushed $IMAGE" >&2
+  -f "$REPO/docker/Dockerfile.runtime" "$REPO"

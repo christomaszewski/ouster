@@ -70,6 +70,38 @@ ros2 lifecycle get /top/os_driver                        # -> active
 ros2 topic hz /top/points
 ```
 
+## Portable Rig builds and replay
+
+With Rig v0.2.61 or later, `rig build` publishes `ouster_driver` for both
+`linux/arm64` and `linux/amd64` under one tag. The driver uses CPU code and needs no
+`jp6m`, `jp7`, or `dev` runtime variants. For a faster single-architecture build,
+use `rig build --arch arm64 --tag <new-tag>` (or `amd64`). Use a new tag when
+narrowing a previously published multiarch release.
+
+Standalone builds remain host-native by default:
+
+```bash
+tools/build_image.sh ghcr.io/your-org mytag
+RIG_BUILD_PLATFORMS=linux/arm64,linux/amd64 tools/build_image.sh ghcr.io/your-org mytag
+```
+
+Multiarch publication needs a Docker Buildx builder supporting both architectures
+and registry push access. Native build nodes are preferable for the C++/PCL build;
+emulation is slower. `OUSTER_BUILD_PLATFORM=linux/<arch>` still selects one
+architecture for standalone builds; Rig's `RIG_BUILD_PLATFORMS` takes precedence.
+`RIG_BUILD_NO_CACHE=1` passes `--no-cache --pull` on both build paths, and the build
+reports the published digest through `RIG_BUILD_RESULT`. Rig uses `OUSTER_IMAGE`
+to select the catalog image by digest during deployment and reconstruction.
+
+Ordinary Rig bag replay republishes the recorded Ouster topics through the bag
+player and does not start this sensor-tier driver by default. Explicitly selecting
+the live driver still requires a reachable sensor. The separate raw-packet replay
+compose workflow remains available for regenerating points from packets.
+
+CI builds the runtime on native arm64 and amd64 runners and runs
+`rig certify --repo . --config sensors/ouster.example.yaml --require-build-check`
+to verify the launcher and no-cache build contract without starting a sensor.
+
 ## Configuration
 
 One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
@@ -286,7 +318,7 @@ The service is published in the public rig registry as `public/ouster`
 ([rig-registry-public](https://github.com/christomaszewski/rig-registry-public)). To cut a release:
 
 ```bash
-gh release create v0.2.0 --generate-notes    # tag + GitHub release in one step
+gh release create v0.4.0 --generate-notes    # tag + GitHub release in one step
 ```
 
 The `registry-release` workflow then updates the registry entry (version + pinned `source.rev`)
