@@ -7,7 +7,8 @@
 # Keep rigging.yaml `msgs.source.repo` and `msgs.source.ref` matched to url/version here
 # (the fleet-ros-msgs overlay for ouster_sensor_msgs), or source provenance drifts.
 # Based on upstream 0.15.1 (73cf036); keeps each queued scan's timestamps with its data
-# and adds regression coverage for backlog, dropped packets, and slot reuse.
+# and adds regression coverage for backlog, dropped packets, slot reuse, and
+# complete 128-beam scans.
 # Retained by fork branch codex/scan-timestamp-ownership. See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
@@ -15,4 +16,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 57bd5c52e48b6c7f1e00ec61df3ba1ccb55df0d9
+    version: 4f81034052082a8a0cddc921679bc3167c5db60b

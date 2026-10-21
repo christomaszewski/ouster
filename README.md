@@ -232,14 +232,19 @@ router — that is rig-managed infrastructure the session connects out to (endpo
 
 The ROS fork keeps each completed scan's sensor timestamp and ROS message timestamp in the same
 queue slot as its data. Its regression blocks the consumer while subsequent scans complete and
-checks scan/header/per-point timing across the supported timestamp modes. Keep this patch until
-an upstream release provides equivalent ownership and regression coverage.
+checks scan/header/per-point timing across the supported timestamp modes. Complete 128-beam,
+2048-column scans also check dimensions and frame-specific range values while queued, using
+sensor and PTP time. These tests do not cover the separate upstream complete-frame origin
+calculation in `TIME_FROM_ROS_TIME`. Keep this patch until an upstream release provides
+equivalent ownership and regression coverage.
 
 The SDK is independently pinned in [`ouster-sdk.repos`](ouster-sdk.repos). Our fork starts at
 upstream `sdk-0.16.2/ouster-ros-0.15.0`, backports the legacy IMU bounds correction from SDK 1.0,
 and receives the oversized-datagram detection byte into separate scratch storage. The UDP fix
 preserves packet lengths and oversized-packet rejection without requiring spare capacity in
-callers' buffers, including buffers exchanged by raw ROS publication. The SDK API remains
+callers' buffers, including buffers exchanged by raw ROS publication. ASan regressions cover
+48-byte legacy IMU packets and both 64- and 128-beam legacy lidar packets, including malformed
+lengths, recovery, and preserving buffers already handed to raw publication. The SDK API remains
 compatible with this ROS driver. An SDK-only update does not change
 `ouster_sensor_msgs`, so leave the two ROS source references matched to each other.
 The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).

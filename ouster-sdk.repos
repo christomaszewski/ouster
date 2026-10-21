@@ -2,6 +2,7 @@
 # Based on upstream sdk-0.16.2/ouster-ros-0.15.0 (358c256); backports the SDK 1.0
 # legacy IMU packet bounds fix and bounds UDP receives to the caller's buffer,
 # including after ROS raw-message buffer swaps, while preserving the 0.16.2 API.
+# Regressions cover 48-byte IMU and 64-/128-beam legacy lidar packets under ASan.
 # Legacy IMU backport: https://github.com/ouster-lidar/ouster-sdk/pull/727
 # Retained by fork branch codex/bounded-udp-receive, atop legacy IMU fix 8559d7c.
 # tools/fetch_upstream.py replaces the ROS checkout's bundled/submodule SDK and
@@ -10,4 +11,4 @@ repositories:
   ouster-sdk:
     type: git
     url: https://github.com/christomaszewski/ouster-sdk.git
-    version: 2ddf31a61c05937f2bc707ef34c5aa5e4f0da021
+    version: 8aa86b94b1c75dfcb99159a4147b44d973e52323
