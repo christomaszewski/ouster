@@ -82,12 +82,27 @@ which controls processed outputs. The replay launch overrides recorded raw-topic
 to match, including older best-effort bags and custom namespaces. Check the actual
 endpoints with `ros2 topic info -v /ouster/lidar_packets` (adjusting the namespace).
 
-The queue is bounded: 1024 legacy 128-beam lidar packets hold about 24.3 MiB and 0.8 s
-at the maximum packet rate, per endpoint before middleware overhead. A stalled reliable
-reader can backpressure live publication and cause UDP loss upstream; select best-effort
-when that tradeoff is preferable, or omit RAW from `proc_mask` when unused. Bursts that
-exceed queue/processing capacity can still lose data. Check scan completeness before
-interpreting zeros in missing columns as timestamp corruption.
+The DDS queue is bounded: 1024 legacy 128-beam lidar packets hold about 24.3 MiB and
+0.8 s at the maximum packet rate, per endpoint before middleware overhead.
+
+Live reception has separate preallocated lidar and IMU publishing queues, controlled
+by startup-only `raw_packet_queue_depth` (default 1024; range 1..65536). Each holds
+that many pending packets plus one in flight, in addition to DDS storage. Publishing
+runs on separate workers, so a slow raw subscriber cannot stall UDP reception or the
+other raw stream through its publish call. When full, a queue drops new raw packets;
+accepted packets retain FIFO order. Overflow and publication-error counters are
+reported per topic once per second when changed, with final totals at shutdown.
+The combined driver's scan batching and IMU handling run before raw enqueue;
+point-cloud conversion continues on its existing worker when raw packets are
+dropped. Omit RAW from `proc_mask` when unused.
+
+Deactivation stops reception, discards queued raw packets, and joins workers before
+destroying publishers. An in-flight middleware publish cannot be portably cancelled;
+the supervisor's shutdown timeout remains the fallback for middleware that hangs.
+Raw bag receipt timestamps include any publishing queue delay, so they are not exact
+UDP arrival timestamps during backlog. Bursts beyond queue/processing capacity can
+still lose data; check scan completeness before interpreting missing columns as
+timestamp corruption.
 
 For live capture, verify the negotiated Ethernet speed. Legacy 128-beam `2048x10`
 data carries about 255 Mb/s of lidar payload alone (24,896 bytes × 1,280 packets/s).

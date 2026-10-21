@@ -10,6 +10,8 @@
 # and adds regression coverage for backlog, dropped packets, slot reuse, and
 # complete 128-beam scans. Raw packet QoS uses explicit bounded queues, with
 # reliable replay and regressions for both maximum-rate legacy lidar modes.
+# Live raw publishing uses bounded per-stream workers, isolating UDP reception
+# from subscriber backpressure, with loopback and sensor-callback regressions.
 # Retained by fork branch codex/scan-timestamp-ownership. See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
@@ -17,4 +19,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: b2ddc6940f9af79e0506de83ef7a0bd443ca9ce1
+    version: c1214cd2f6d8b72be27bab464a667688760b0cc4

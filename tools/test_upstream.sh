@@ -86,6 +86,20 @@ RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
   "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_qos_test" \
   ouster_ros_raw_packet_qos_test
 
+# Hold raw publication blocked while SDK UDP reception and actual sensor-node
+# callbacks continue. Verify bounded overflow, byte ownership, independent IMU
+# publication, exceptions, and worker shutdown/reactivation.
+cmake --build "${test_root}/ros-build/ouster_ros" \
+  --target ouster_ros_raw_packet_publisher_test ouster_ros_raw_packet_sensor_test \
+  --parallel "${build_jobs}"
+run_gtest \
+  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_publisher_test" \
+  ouster_ros_raw_packet_publisher_test
+LD_LIBRARY_PATH="${test_root}/ros-build/ouster_ros:${LD_LIBRARY_PATH:-}" \
+  RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
+  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_sensor_test" \
+  ouster_ros_raw_packet_sensor_test
+
 # Check QoS upgrades for older bags, namespace remaps, and generated-profile
 # cleanup. Explicitly reject an empty suite if a future pin removes these tests.
 python3 - "${ros_source}/test" "${test_root}/results/replay_packet_launch_test.json" <<'PY'

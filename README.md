@@ -245,8 +245,13 @@ replay launch supplies matching rosbag QoS overrides for old recordings and cust
 namespaces. The burst regression pauses the actual cloud component's executor,
 queues 0.3 seconds of maximum-rate legacy packets, then checks every point's range
 and relative timestamp plus each IMU timestamp. Both `2048x10` and `1024x20` are
-covered. See [replay notes](docker/README.md#replay-no-hardware) for bounded queue
-capacity and live reception backpressure tradeoffs.
+covered. Live raw publication uses separate lidar and IMU workers with preallocated
+queues (`raw_packet_queue_depth: 1024` per stream, independent of DDS depth). A slow
+raw subscriber can fill that queue and cause counted raw packet drops, but cannot
+block UDP reception through the publish call. Regressions block publication while
+checking actual sensor callbacks, SDK loopback reception, packet ownership, queue
+overflow, independent IMU publication, and shutdown/reactivation. See
+[replay notes](docker/README.md#replay-no-hardware) for capacity and timing limits.
 
 The SDK is independently pinned in [`ouster-sdk.repos`](ouster-sdk.repos). Our fork starts at
 upstream `sdk-0.16.2/ouster-ros-0.15.0`, backports the legacy IMU bounds correction from SDK 1.0,
