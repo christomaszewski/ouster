@@ -30,8 +30,12 @@ TAG="${2:-latest}"
 IMAGE="${REGISTRY}/ouster_driver:${TAG}"
 
 set --
+if [ -n "${RIG_BUILD_NO_CACHE:-}" ]; then
+  # Docker --no-cache bypasses layers, but leaves compiler-cache mounts intact.
+  set -- --build-arg OUSTER_DISABLE_CCACHE=1 "$@"
+fi
 if [ -z "${RIG_BUILD_PLATFORMS:-}" ] && [ -n "${OUSTER_BUILD_PLATFORM:-}" ]; then
-  set -- --platform "$OUSTER_BUILD_PLATFORM"
+  set -- --platform "$OUSTER_BUILD_PLATFORM" "$@"
 fi
 rig_build "$IMAGE" "$@" \
   --build-arg "ROS_DISTRO=${ROS_DISTRO:-lyrical}" \

@@ -74,10 +74,18 @@ if "--metadata-file" in args:
         self.assertIn("BASE_IMAGE=ros:lyrical-ros-core", build)
         for flag in ("--no-cache", "--pull", "--platform"):
             self.assertNotIn(flag, build)
+        self.assertNotIn("OUSTER_DISABLE_CCACHE=1", build)
 
     def test_standalone_platform_override_is_preserved(self):
         build, _ = self.successful_build(**{PLATFORM_ENV: "linux/amd64"})
         self.assertEqual(build[build.index("--platform") + 1], "linux/amd64")
+
+    def test_clean_standalone_platform_build_disables_compiler_cache(self):
+        build, _ = self.successful_build(
+            RIG_BUILD_NO_CACHE="1", **{PLATFORM_ENV: "linux/amd64"})
+        self.assertEqual(build[build.index("--platform") + 1], "linux/amd64")
+        self.assertIn("--no-cache", build)
+        self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
 
     def test_no_cache_and_fleet_parent_reach_both_build_paths(self):
         for platforms in ("", "linux/arm64,linux/amd64"):
@@ -87,6 +95,7 @@ if "--metadata-file" in args:
                     ROS_DISTRO="fleet-distro", RIG_BASE_IMAGE="registry.test/fleet@sha256:123")[0]
                 self.assertIn("--no-cache", build)
                 self.assertIn("--pull", build)
+                self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
                 self.assertIn("ROS_DISTRO=fleet-distro", build)
                 self.assertIn("BASE_IMAGE=registry.test/fleet@sha256:123", build)
 
@@ -138,6 +147,7 @@ if "--metadata-file" in args:
         build, _ = self.successful_build(RIG_BUILD_NO_CACHE="1", RIG_BUILD_PULL="0")
         self.assertIn("--no-cache", build)
         self.assertNotIn("--pull", build)
+        self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
 
 
 if __name__ == "__main__":

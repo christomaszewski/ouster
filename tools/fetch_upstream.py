@@ -43,7 +43,11 @@ def fetch(source_root, manifest_root):
             with manifest.open() as stream:
                 run("vcs", "import", str(staging), stdin=stream)
             checkout = staging / key
-            run("git", "-C", str(checkout), "submodule", "update", "--init", "--recursive")
+            # The bundled SDK is replaced below. Do not fetch it (or its
+            # children), but still initialize every other required submodule.
+            # This also handles revisions where the SDK is a vendored tree.
+            paths = ("--", ".", ":(exclude)ouster-ros/ouster-sdk") if key == "ouster-ros" else ()
+            run("git", "-C", str(checkout), "submodule", "update", "--init", "--recursive", *paths)
             revision = run("git", "-C", str(checkout), "rev-parse", "HEAD",
                            capture_output=True).stdout.strip()
             ref = str(spec["version"])

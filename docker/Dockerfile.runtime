@@ -9,8 +9,8 @@
 # Cross-arch (Jetson/arm64): docker buildx build --platform linux/arm64 ... --load  — build on an
 # arm64 host; the SDK/PCL compile is painfully slow under qemu emulation.
 #
-# Layer caching: source manifests and the fetch helper are copied before the source fetch,
-# so changing a pin invalidates the fetched sources and build.
+# Dependency layers are keyed by upstream package.xml contents, independently of source pins.
+# Compiler-cache mounts accelerate source changes; runtime never contains those caches or tests.
 ARG ROS_DISTRO=lyrical
 # Shared build/runtime parent. Under rig, tools/build_image.sh forwards RIG_BASE_IMAGE so both stages
 # use the deployment's one shared base (fleet-ros = ros-base + rmw-zenoh +
@@ -32,7 +32,7 @@ RUN dpkg-query -W -f='${Package} ${db:Status-Status}\n' 'ros-*' \
       | awk '$2 == "installed" {print $1}' | xargs -r apt-mark hold
 
 # ---- build stage ------------------------------------------------------------
-FROM base AS build
+FROM base AS toolchain
 ARG ROS_DISTRO
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,17 +43,30 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::Upgrade "false";\n' \
       > /etc/apt/apt.conf.d/99-rig-apt-policy
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake ninja-build git ca-certificates \
+      build-essential cmake ninja-build ccache git ca-certificates \
       python3-colcon-common-extensions python3-rosdep python3-vcstool \
   && rm -rf /var/lib/apt/lists/* \
   && (rosdep init 2>/dev/null || true)
 
 WORKDIR /workspace
+FROM toolchain AS sources
 # Fetch both exact source versions. The helper replaces the SDK only inside a fresh checkout,
 # fails on fetch/submodule errors, and records the actual commits used by this build.
 COPY ouster.repos ouster-sdk.repos /workspace/
 COPY tools/fetch_upstream.py /workspace/tools/fetch_upstream.py
 RUN python3 /workspace/tools/fetch_upstream.py /workspace/src
+# Use the same package discovery as rosdep, including package/ignore boundaries.
+# Copy all discovered manifests so future source packages cannot silently lose deps.
+RUN python3 - <<'PY'
+from pathlib import Path
+import shutil
+from catkin_pkg.packages import find_packages
+root = Path('/workspace/src')
+for relative in find_packages(str(root)):
+    target = Path('/workspace/deps') / relative / 'package.xml'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / relative / 'package.xml', target)
+PY
 
 # fleet-msgs provenance (rig image audit ≥ v0.2.30): record what the checkout above ACTUALLY used
 # for the ouster_sensor_msgs interfaces — declared ref + resolved commit SHA — at the one
@@ -68,12 +81,25 @@ RUN url="$(awk '$1 == "url:" {print $2}' /workspace/ouster.repos)" \
  && sh /usr/local/bin/provenance-record.sh /opt/fleet-msgs/provenance.yaml \
       "$url" "$ref" /workspace/src/ouster-ros ouster_sensor_msgs
 
-# Resolve every declared dep from the vendored package.xml files (ROS pkgs + system libs: pcl,
-# opencv via cv_bridge, curl, spdlog, jsoncpp, eigen, ...). rosdep, not a hand-maintained apt list.
+# Copy only manifests into the dependency stage: a source pin change with identical
+# dependencies must not reinstall the large PCL/OpenCV build toolchain.
+FROM toolchain AS build-deps
+COPY --from=sources /workspace/deps /workspace/deps
 RUN apt-get update \
  && rosdep update --rosdistro "${ROS_DISTRO}" \
- && rosdep install --from-paths /workspace/src --ignore-src -y --rosdistro "${ROS_DISTRO}" \
- && rm -rf /var/lib/apt/lists/*
+ && rosdep install --from-paths /workspace/deps --ignore-src -y --rosdistro "${ROS_DISTRO}" \
+ && rm -rf /workspace/deps /var/lib/apt/lists/*
+
+FROM build-deps AS build
+ARG TARGETARCH
+ARG BUILD_JOBS
+# --no-cache does not clear BuildKit cache mounts. The rig helper sets this flag
+# for deliberately clean builds; direct Docker invocations can set it explicitly.
+ARG OUSTER_DISABLE_CCACHE=0
+ENV BUILD_JOBS=${BUILD_JOBS} CCACHE_DIR=/root/.cache/ccache \
+    CCACHE_MAXSIZE=1G CCACHE_COMPILERCHECK=content
+COPY --from=sources /workspace/src /workspace/src
+COPY --from=sources /opt/fleet-msgs/provenance.yaml /opt/fleet-msgs/provenance.yaml
 
 # Lyrical removed ament_target_dependencies (upstream ouster-ros still calls it); inject a
 # backward-compat shim WITHOUT touching upstream sources — scoped to the ouster_ros project via
@@ -84,12 +110,17 @@ COPY docker/ament_target_dependencies_compat.cmake /workspace/ament_compat.cmake
 # (libtins/...) aren't linked or shipped. NOTE: libzip is NOT one of them — ouster_client links it
 # unconditionally at this pin (BUILD_OSF=OFF does not gate it); see docker/runtime_extra_deps/.
 # -Wno-deprecated-declarations matches upstream's own Dockerfile.
-RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
+RUN --mount=type=cache,id=ouster-ccache-${ROS_DISTRO}-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
+    if [ "${OUSTER_DISABLE_CCACHE}" = 1 ]; then export CCACHE_DISABLE=1; fi \
+ && export CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-$(nproc)}" MAKEFLAGS="-j${BUILD_JOBS:-$(nproc)}" \
+ && source "/opt/ros/${ROS_DISTRO}/setup.bash" \
  && colcon build --base-paths /workspace/src --merge-install \
-      --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+      --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations" \
+                   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
                    -DCMAKE_PROJECT_ouster_ros_INCLUDE=/workspace/ament_compat.cmake \
                    -DBUILD_TESTING=OFF \
-                   -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
+                   -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF \
+ && ccache --show-stats
 # Record the actual compiler environment, including deps absent from the parent. The final
 # stage compares all overlapping ROS packages, catching stale independently cached apt layers.
 RUN dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Status}\n' 'ros-*' \
@@ -101,7 +132,10 @@ FROM build AS upstream-tests
 RUN apt-get update && apt-get install -y --no-install-recommends libgtest-dev \
  && rm -rf /var/lib/apt/lists/*
 COPY tools/test_upstream.sh /workspace/tools/test_upstream.sh
-RUN bash /workspace/tools/test_upstream.sh
+RUN --mount=type=cache,id=ouster-ccache-${ROS_DISTRO}-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
+    if [ "${OUSTER_DISABLE_CCACHE}" = 1 ]; then export CCACHE_DISABLE=1; fi \
+ && bash /workspace/tools/test_upstream.sh \
+ && ccache --show-stats
 
 # ---- runtime stage ----------------------------------------------------------
 FROM base AS runtime
@@ -132,8 +166,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-rosdep python3-yaml ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
   && rm -rf /var/lib/apt/lists/* \
   && (rosdep init 2>/dev/null || true)
-COPY --from=build /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
-COPY --from=build /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/deps/ouster_sensor_msgs/package.xml
+COPY --from=sources /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
+COPY --from=sources /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/deps/ouster_sensor_msgs/package.xml
 # Wrapper deps and upstream manifest gaps (see the file's header):
 # rides the same rosdep pass as the upstream manifests, so nothing is hand-pinned to a soname.
 COPY docker/runtime_extra_deps/package.xml /tmp/deps/ouster_wrapper_runtime_deps/package.xml

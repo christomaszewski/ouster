@@ -47,6 +47,27 @@ base deliberately in that case. The final check also compares installed ROS pack
 `rig image audit` checks agreement between final images and source provenance; it does not
 check the discarded compiler environment or resolve the symbols inside custom libraries.
 
+Dependency installation is cached by the fetched `package.xml` contents, so a source-only
+pin change reuses the installed toolchain. Runtime dependencies can install while the driver
+compiles. Production uses Ninja and ccache; `--build-arg BUILD_JOBS=2` bounds compilation
+when needed (production defaults to available CPUs, regression builds default to two jobs).
+The compiler cache is a BuildKit mount, scoped by ROS distro and architecture, with a 1 GiB
+limit. CI explicitly restores/saves that mount in addition to its Docker layer caches.
+
+Docker's `--no-cache` bypasses layers but does not empty compiler-cache mounts. The rig
+helper additionally passes `OUSTER_DISABLE_CCACHE=1` for a clean build. For a direct build:
+
+```bash
+docker build --no-cache --pull --build-arg OUSTER_DISABLE_CCACHE=1 \
+  -f docker/Dockerfile.runtime -t ouster_driver:clean .
+docker build --target upstream-tests -f docker/Dockerfile.runtime .
+```
+
+The opt-in regression stage reuses production Release objects without installing over the
+production overlay, and verifies both properties in `/workspace/upstream-tests/build-reuse.json`.
+The SDK receive regressions still use a separate AddressSanitizer build. Tests and compiler
+caches remain outside the runtime image.
+
 ## Dev container
 
 ```bash

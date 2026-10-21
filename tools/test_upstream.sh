@@ -6,6 +6,7 @@ set -eo pipefail
 workspace="${1:-/workspace}"
 test_root="${workspace}/upstream-tests"
 ros_source="${workspace}/src/ouster-ros/ouster-ros"
+ros_build="${workspace}/build/ouster_ros"
 sdk_source="${ros_source}/ouster-sdk"
 build_jobs="${BUILD_JOBS:-2}"
 
@@ -17,9 +18,86 @@ source "/opt/ros/${ROS_DISTRO:-lyrical}/setup.bash"
 source "${workspace}/install/setup.bash"
 set -u
 export CMAKE_BUILD_PARALLEL_LEVEL="${build_jobs}"
-# colcon supplies make's CPU-count default unless MAKEFLAGS is set.
+# Also bound parallelism when the inherited tree uses Makefiles.
 export MAKEFLAGS="-j${build_jobs}"
 mkdir -p "${test_root}/results"
+
+check_build_reuse() {
+  python3 - "$1" "${ros_build}" "${ros_source}" "${workspace}/install" \
+    "${test_root}/build-reuse.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import stat
+import sys
+
+phase, build, source, install, report = sys.argv[1:]
+build, source, install, report = map(Path, (build, source, install, report))
+cache = {}
+for line in (build / "CMakeCache.txt").read_text().splitlines():
+    if not line.startswith(("//", "#")) and ":" in line and "=" in line:
+        key, value = line.split("=", 1)
+        cache[key.split(":", 1)[0]] = value
+if cache.get("CMAKE_BUILD_TYPE") != "Release":
+    raise SystemExit("Regression reuse requires the production Release build")
+if Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() != source.resolve():
+    raise SystemExit("Production CMake cache points at a different source tree")
+configuration = {key: value for key, value in cache.items()
+                 if key.startswith(("CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS"))
+                 or key in ("CMAKE_BUILD_TYPE", "CMAKE_GENERATOR",
+                            "CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER",
+                            "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER")}
+
+def fingerprint(path):
+    if path.is_symlink():
+        return {"symlink": str(path.readlink())}
+    return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "mode": stat.S_IMODE(path.stat().st_mode)}
+
+def installed_files():
+    if not (install / "setup.bash").is_file():
+        raise SystemExit("Production install is missing setup.bash")
+    return {str(path.relative_to(install)): fingerprint(path)
+            for path in sorted(install.rglob("*"))
+            if path.is_symlink() or path.is_file()}
+
+def object_file(path):
+    # mtime catches recompilation even when ccache restores identical bytes.
+    return dict(fingerprint(path), mtime_ns=path.stat().st_mtime_ns)
+
+if phase == "snapshot":
+    objects = {str(path.relative_to(build)): object_file(path)
+               for path in sorted(build.rglob("*.o"))}
+    if not objects:
+        raise SystemExit("No production objects available for regression reuse")
+    report.write_text(json.dumps({"configuration": configuration,
+                                 "objects": objects,
+                                 "install": installed_files()}, indent=2) + "\n")
+elif phase == "verify":
+    before = json.loads(report.read_text())
+    if configuration != before["configuration"]:
+        raise SystemExit("Regression build changed production compiler settings")
+    rebuilt = [name for name, value in before["objects"].items()
+               if not (build / name).is_file() or object_file(build / name) != value]
+    if rebuilt:
+        raise SystemExit(f"Production objects were rebuilt: {rebuilt[:5]}")
+    after = installed_files()
+    changed = sorted(name for name in before["install"].keys() | after.keys()
+                     if before["install"].get(name) != after.get(name))
+    if changed:
+        raise SystemExit(f"Regression build changed production install: {changed[:5]}")
+    before["verification"] = {"production_objects_reused": len(before["objects"]),
+                              "production_install_unchanged": True}
+    report.write_text(json.dumps(before, indent=2) + "\n")
+    print(f"Reused {len(before['objects'])} production objects; install unchanged")
+else:
+    raise SystemExit(f"Unknown reuse check: {phase}")
+PY
+}
+
+# This stage inherits the completed production build. Record its objects and
+# install before compiling tests, so a lost reuse or accidental install fails CI.
+check_build_reuse snapshot
 
 run_gtest() {
   local binary="$1" name="$2"
@@ -50,6 +128,7 @@ PY
 # targets explicitly fails if a source pin drops either regression.
 cmake -S "${sdk_source}" -B "${test_root}/sdk-asan" -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
   -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address \
   -DBUILD_TESTING=ON -DOUSTER_INTERNAL_TESTS=OFF \
@@ -60,44 +139,38 @@ cmake --build "${test_root}/sdk-asan" \
 run_gtest "${test_root}/sdk-asan/tests/client_receive_test" client_receive_test
 run_gtest "${test_root}/sdk-asan/tests/imu_packet_test" imu_packet_test
 
-# Use a separate build tree so production artifacts stay uninstrumented and
-# BUILD_TESTING remains OFF in the runtime build. This target exercises the
-# actual threaded LidarPacketHandler and scan-to-cloud path.
-colcon --log-base "${test_root}/ros-log" build \
-  --base-paths "${ros_source}" --packages-select ouster_ros \
-  --build-base "${test_root}/ros-build" \
-  --install-base "${test_root}/ros-install" --merge-install \
-  --event-handlers console_direct+ \
-  --cmake-target ouster_ros_lidar_packet_handler_test \
-  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DCMAKE_CXX_FLAGS=-Wno-deprecated-declarations \
-    "-DCMAKE_PROJECT_ouster_ros_INCLUDE=${workspace}/ament_compat.cmake" \
-    -DBUILD_TESTING=ON \
-    -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
+# Enable tests in the inherited Release tree, preserving its cached generator,
+# flags and compiler launchers. These tests remain uninstrumented; ASan uses the
+# separate SDK tree above. Never install from this stage: runtime copies the
+# original build stage's install, which this check also verifies stays unchanged.
+cmake -S "${ros_source}" -B "${ros_build}" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build "${ros_build}" \
+  --target ouster_ros_lidar_packet_handler_test --parallel "${build_jobs}"
 run_gtest \
-  "${test_root}/ros-build/ouster_ros/ouster_ros_lidar_packet_handler_test" \
+  "${ros_build}/ouster_ros_lidar_packet_handler_test" \
   ouster_ros_lidar_packet_handler_test
 
 # Exercise the real processing component through middleware with a paused
 # executor, then drain a complete packet burst and check every point/IMU value.
-cmake --build "${test_root}/ros-build/ouster_ros" \
+cmake --build "${ros_build}" \
   --target ouster_ros_raw_packet_qos_test --parallel "${build_jobs}"
 RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
-  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_qos_test" \
+  "${ros_build}/ouster_ros_raw_packet_qos_test" \
   ouster_ros_raw_packet_qos_test
 
 # Hold raw publication blocked while SDK UDP reception and actual sensor-node
 # callbacks continue. Verify bounded overflow, byte ownership, independent IMU
 # publication, exceptions, and worker shutdown/reactivation.
-cmake --build "${test_root}/ros-build/ouster_ros" \
+cmake --build "${ros_build}" \
   --target ouster_ros_raw_packet_publisher_test ouster_ros_raw_packet_sensor_test \
   --parallel "${build_jobs}"
 run_gtest \
-  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_publisher_test" \
+  "${ros_build}/ouster_ros_raw_packet_publisher_test" \
   ouster_ros_raw_packet_publisher_test
-LD_LIBRARY_PATH="${test_root}/ros-build/ouster_ros:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="${ros_build}:${LD_LIBRARY_PATH:-}" \
   RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
-  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_sensor_test" \
+  "${ros_build}/ouster_ros_raw_packet_sensor_test" \
   ouster_ros_raw_packet_sensor_test
 
 # Check QoS upgrades for older bags, namespace remaps, and generated-profile
@@ -122,3 +195,5 @@ report_path.write_text(json.dumps({
 if not result.wasSuccessful() or result.testsRun == len(result.skipped):
     raise SystemExit("Replay launch regressions failed")
 PY
+
+check_build_reuse verify
