@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Minimal production image for the upstream ouster-ros driver, VENDORED AT BUILD TIME. Self-contained
-# two-stage build: tools/fetch_upstream.py fetches the pinned ROS driver and SDK override
+# Build/runtime stages plus an opt-in regression target. tools/fetch_upstream.py fetches the pinned ROS driver and SDK override
 # from their .repos manifests and compiles them (Release); the runtime stage ships the install/ overlay on
 # BASE_IMAGE (default ros-core), with exec-only deps resolved by rosdep (no hand-listed,
 # version-fragile lib names).
@@ -94,6 +94,14 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 # stage compares all overlapping ROS packages, catching stale independently cached apt layers.
 RUN dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Status}\n' 'ros-*' \
       | awk '$3 == "installed" {print $1 "\t" $2}' > /workspace/build-ros-packages.tsv
+
+# Opt-in regression target. Keep sanitizer instrumentation and test dependencies
+# out of the production runtime; CI builds this target separately.
+FROM build AS upstream-tests
+RUN apt-get update && apt-get install -y --no-install-recommends libgtest-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY tools/test_upstream.sh /workspace/tools/test_upstream.sh
+RUN bash /workspace/tools/test_upstream.sh
 
 # ---- runtime stage ----------------------------------------------------------
 FROM base AS runtime

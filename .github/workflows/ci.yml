@@ -44,6 +44,19 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             ROS_DISTRO=${{ env.ROS_DISTRO }}
+      - name: Test SDK receive bounds and ROS scan timestamps
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runtime
+          target: upstream-tests
+          push: false
+          cache-from: |
+            type=gha
+            type=gha,scope=ouster-upstream-tests
+          cache-to: type=gha,scope=ouster-upstream-tests,mode=max
+          build-args: |
+            ROS_DISTRO=${{ env.ROS_DISTRO }}
       - name: Test packaged supervisor and ROS temperature topic
         run: |
           docker run --rm --init --network none \
@@ -134,4 +147,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck launcher + build script + entrypoints
-        run: shellcheck ouster-up tools/build_image.sh docker/entrypoints/*.sh
+        run: shellcheck ouster-up tools/build_image.sh tools/test_upstream.sh docker/entrypoints/*.sh

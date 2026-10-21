@@ -1,18 +1,18 @@
-# Upstream Ouster ROS 2 driver — fetched at image-build time by docker/Dockerfile.runtime
+# Patched Ouster ROS 2 driver — fetched at image-build time by docker/Dockerfile.runtime
 # (tools/fetch_upstream.py, using vcstool). Nothing upstream is committed to this repo;
 # it lives only in the build and in a gitignored src/ for local dev. The SDK override is
 # pinned independently in ouster-sdk.repos and applied by the same fetch helper.
 #
-# `version` MUST be an exact tag or commit SHA (never a branch) for reproducible builds. A bump
-# here must also bump rigging.yaml `msgs.source.ref` (the fleet-ros-msgs overlay pin for
-# ouster_sensor_msgs — same repo), or bag-recorded schemas silently skew. Upstream's
-# ros2-branch releases are tagged plain `MAJOR.MINOR.PATCH` (newer scheme) and/or per-distro
-# (`kilted-0.15.1`, `rolling-0.15.1`, … all the same commit). Bump this to a newer release tag to
-# update; watch for a future `lyrical-*` tag. See README "Updating upstream".
+# `version` MUST be a full commit SHA (never a branch) for reproducible patched builds.
+# Keep rigging.yaml `msgs.source.repo` and `msgs.source.ref` matched to url/version here
+# (the fleet-ros-msgs overlay for ouster_sensor_msgs), or source provenance drifts.
+# Based on upstream 0.15.1 (73cf036); keeps each queued scan's timestamps with its data
+# and adds regression coverage for backlog, dropped packets, and slot reuse.
+# Retained by fork branch codex/scan-timestamp-ownership. See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
 repositories:
   ouster-ros:
     type: git
-    url: https://github.com/ouster-lidar/ouster-ros.git
-    version: 0.15.1          # latest stable release tag (commit 73cf036) on the ros2 lineage
+    url: https://github.com/christomaszewski/ouster-ros.git
+    version: 57bd5c52e48b6c7f1e00ec61df3ba1ccb55df0d9
