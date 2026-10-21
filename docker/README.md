@@ -47,6 +47,88 @@ base deliberately in that case. The final check also compares installed ROS pack
 `rig image audit` checks agreement between final images and source provenance; it does not
 check the discarded compiler environment or resolve the symbols inside custom libraries.
 
+Dependency installation is cached by the fetched `package.xml` contents, so a source-only
+pin change reuses the installed toolchain. Runtime dependencies can install while the driver
+compiles. Production uses Ninja and ccache; `--build-arg BUILD_JOBS=2` bounds compilation
+when needed (production defaults to available CPUs, regression builds default to two jobs).
+The compiler cache is a BuildKit mount, scoped by ROS distro and architecture, with a 1 GiB
+limit. CI explicitly restores/saves that mount in addition to its Docker layer caches.
+Printed ccache statistics accumulate across builds; compare changes in hit/miss counts
+to assess one rebuild.
+
+Docker's `--no-cache` bypasses layers but does not empty compiler-cache mounts. The rig
+helper additionally passes `OUSTER_DISABLE_CCACHE=1` for a clean build. For a direct build:
+
+```bash
+docker buildx build --no-cache --pull --build-arg OUSTER_DISABLE_CCACHE=1 \
+  -f docker/Dockerfile.runtime -t ouster_driver:clean --load .
+# Keep the same build arguments and builder to reuse that clean production build,
+# but execute the regression stage again with compiler-cache reads disabled.
+docker buildx build --no-cache-filter upstream-tests \
+  --build-arg OUSTER_DISABLE_CCACHE=1 --target upstream-tests \
+  -f docker/Dockerfile.runtime .
+```
+
+The opt-in regression stage reuses production Release objects without installing over the
+production overlay, and verifies both properties in `/workspace/upstream-tests/build-reuse.json`.
+The SDK receive regressions still use a separate AddressSanitizer build. Tests and compiler
+caches remain outside the runtime image.
+
+### Build measurements (2026-10-21)
+
+The build changes in `d3617ac` were compared with the v0.5.0 baseline `035465d`.
+Each architecture used native execution, separate initially empty BuildKit v0.33.1
+builders, two CPUs and an 8 GiB memory limit. Before/after runs were sequential on
+each host, with the same pinned ROS parent and patched ROS/SDK commits.
+
+The following times include building/loading the runtime image, then building the
+upstream regression target and exporting its results. They exclude the separate
+packaged Python suite, builder setup, and GitHub cache transfer. These are individual
+measurements, so apt/network variation affects the cold totals.
+The Docker daemon's image store was retained between runs; the builders' layer and
+compiler caches were empty for each cold run.
+The amd64 host was resized from roughly 16 to 32 GiB of RAM between variants;
+its eight host CPUs and the builder's two-CPU/8-GiB limits were unchanged.
+An interrupted optional amd64 refetch run and a failed cold attempt (ROS metadata
+HTTPS timeout) are excluded. Compare timings within each architecture, not between
+the two different hosts.
+
+| Architecture | Cache state | Before | After |
+|---|---|---:|---:|
+| arm64 | Empty builder and compiler cache | 7m36s | 5m41s |
+| arm64 | Unchanged rebuild | 4.56s | 4.68s |
+| arm64 | Forced refetch of the same source pins | 8m12s | 34.64s |
+| amd64 | Empty builder and compiler cache | 23m26s | 15m18s |
+| amd64 | Unchanged rebuild | 7.99s | 7.65s |
+
+An unchanged rebuild reuses cached test results. The forced-refetch scenario appends
+a harmless comment to the fetch helper, invalidating the fetch layer while retaining
+the exact source pins and manifests; it executes the tests again. It measures reuse
+of unchanged dependencies and compiler outputs, not the cost of a real C++ change.
+Both architectures reused the dependency layer and added 189 compiler-cache hits
+with zero new misses. The optimized amd64 refetch took 64.04 seconds; its baseline
+refetch was excluded as explained above. The cold regression target fell from
+206.63 to 93.19 seconds on arm64 and 615.12 to 230.94 seconds on amd64.
+Both reuse guards verified all 74
+production objects in the ROS-driver build tree and the unchanged install.
+Runtime-image builds alone took 249.77 → 247.74 seconds on arm64 and
+790.38 → 687.44 seconds on amd64.
+
+All 49 upstream regressions passed, including the separate ASan SDK receive tests.
+The 92 service/build-guard cases and 10 build-contract cases also passed; three
+fetch cases need vcstool and execute in the builder instead of the runtime image.
+Source provenance and installed ROS package versions matched before and after.
+Runtime image sizes remained effectively unchanged: arm64 was 1,566,265,834 →
+1,566,361,285 bytes and amd64 was 1,621,972,492 → 1,621,976,481 bytes (uncompressed).
+
+The real workflow also passed on both architectures with
+[new caches](https://github.com/christomaszewski/ouster/actions/runs/39569490113)
+and [restored caches](https://github.com/christomaszewski/ouster/actions/runs/39571756777).
+These CI runs are separate from the controlled native timing measurements above.
+The restored-cache jobs took 2m07s on amd64 and 2m00s on arm64, including the packaged
+service tests. Their upstream-test layers were cached. Both fresh runners restored
+and injected the architecture-specific compiler-cache archives (about 63 MB each).
+
 ## Dev container
 
 ```bash
