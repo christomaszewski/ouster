@@ -26,6 +26,18 @@ class FetchUpstreamTests(unittest.TestCase):
         self.manifests = self.root / "manifests"
         self.manifests.mkdir()
 
+    def test_patched_sources_are_immutable_and_messages_match_driver(self):
+        driver = yaml.safe_load((ROOT / "ouster.repos").read_text())["repositories"]["ouster-ros"]
+        sdk = yaml.safe_load((ROOT / "ouster-sdk.repos").read_text())["repositories"]["ouster-sdk"]
+        for source in (driver, sdk):
+            self.assertRegex(str(source["version"]), r"^[0-9a-f]{40}$")
+        message_sources = yaml.safe_load((ROOT / "rigging.yaml").read_text())["msgs"]["source"]
+        matches = [source for source in message_sources
+                   if "ouster_sensor_msgs" in source["packages"]]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["repo"], driver["url"])
+        self.assertEqual(str(matches[0]["ref"]), str(driver["version"]))
+
     def repository(self, name, files):
         repo = self.root / name
         repo.mkdir()

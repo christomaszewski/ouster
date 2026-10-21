@@ -51,6 +51,20 @@ jobs:
           cache-to: type=gha,mode=max,scope=runtime-${{ matrix.arch }}
           build-args: |
             ROS_DISTRO=${{ env.ROS_DISTRO }}
+      - name: Test SDK bounds, scan timestamps, raw bursts, and backpressure
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runtime
+          target: upstream-tests
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          cache-from: |
+            type=gha,scope=runtime-${{ matrix.arch }}
+            type=gha,scope=ouster-upstream-tests-${{ matrix.arch }}
+          cache-to: type=gha,scope=ouster-upstream-tests-${{ matrix.arch }},mode=max
+          build-args: |
+            ROS_DISTRO=${{ env.ROS_DISTRO }}
       - name: Test packaged supervisor and ROS temperature topic
         run: |
           docker run --rm --init --network none \
@@ -113,4 +127,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck launcher + build script + entrypoints
-        run: shellcheck -x ouster-up tools/build_image.sh tools/rig-build.sh docker/entrypoints/*.sh
+        run: shellcheck -x ouster-up tools/build_image.sh tools/rig-build.sh tools/test_upstream.sh docker/entrypoints/*.sh

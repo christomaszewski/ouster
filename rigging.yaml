@@ -45,15 +45,15 @@ images:
 # sensor_msgs (PointCloud2/Imu/LaserScan/Image), std_msgs (metadata String), std_srvs, tf2_msgs,
 # lifecycle_msgs — ros-base/common_interfaces already carry those. ouster_sensor_msgs (PacketMsg +
 # Telemetry msgs, GetConfig/SetConfig/GetMetadata srvs) lives INSIDE the upstream driver repo, so
-# ref below MUST equal the `version:` pin in ouster.repos (what the image build's `vcs import`
-# checks out) — bump both together or the overlay's definitions silently skew from what this image
+# repo/ref below MUST equal the url/version pins in ouster.repos (what the image build's `vcs import`
+# checks out) — update both together or the overlay's definitions silently skew from what this image
 # publishes (schema mismatch in the recorded bag). The image-side identity for `rig image audit`
 # is baked at /opt/fleet-msgs/provenance.yaml by docker/Dockerfile.runtime, which parses url+ref
 # out of ouster.repos itself (never re-typed from this block).
 msgs:
   source:
-    - repo: https://github.com/ouster-lidar/ouster-ros.git
-      ref: 0.15.1             # = ouster.repos `version:` (commit 73cf036)
+    - repo: https://github.com/christomaszewski/ouster-ros.git
+      ref: c1214cd2f6d8b72be27bab464a667688760b0cc4 # = ouster.repos version
       packages: [ouster_sensor_msgs]
 
 # Host-facing UDP ports rig doctor checks for clashes across sensors (host networking -> ports are

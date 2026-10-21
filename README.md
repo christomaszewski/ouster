@@ -6,17 +6,17 @@ A thin, rig-compatible packaging of the upstream
 [`ouster-ros`](https://github.com/ouster-lidar/ouster-ros) lidar driver (the `ros2` lineage),
 targeting **ROS 2 Lyrical** and the in-house **rig** orchestrator.
 
-Unlike the `sbg`/`vectornav` drivers in this workspace (which reimplement their devices in-house),
-this repo **wraps the official Ouster driver unmodified** so upstream releases can be pulled in with
-a one-line version bump. We add **no C++ of our own** — only the rig-integration shell: a launcher,
-a params mapper, a Python operational-state supervisor, Docker, compose, and the `rig` descriptor.
+This repo packages the official driver with narrowly scoped fixes maintained in our ROS and SDK
+forks. Exact source commits are fetched at build time; C++ sources are not vendored here. The
+service provides the rig-integration shell: a launcher, a params mapper, a Python operational-state
+supervisor, Docker, compose, and the `rig` descriptor.
 
 ## How it works
 
 | Piece | Role |
 |-------|------|
-| `ouster.repos` | Pins the upstream `ouster-ros` release. Fetched with `vcs import` at image-build time — nothing upstream is committed here, so the repo stays tiny. |
-| `ouster-sdk.repos` | Pins the ROS-compatible SDK fork containing the legacy IMU bounds fix. |
+| `ouster.repos` | Pins our ROS 0.15.1-based fork with per-scan timestamp ownership and regression tests. |
+| `ouster-sdk.repos` | Pins the ROS-compatible SDK fork containing legacy IMU bounds and UDP receive-buffer fixes. |
 | `tools/fetch_upstream.py` | Fetches both pins into a fresh checkout, replaces the bundled SDK, and records their actual revisions. |
 | `tools/render_params.py` | Maps a generic rig sensor config (`connection` + `driver_params`) → upstream's `driver_params.yaml` keys. Keyed by the `/**` wildcard so it binds at any namespace. |
 | `docker/compose/compose.deploy.yaml` | Runs the supervisor, which starts upstream's unmodified headless launch only after the sensor is running. |
@@ -249,20 +249,52 @@ router — that is rig-managed infrastructure the session connects out to (endpo
 
 ## Updating upstream
 
-1. Bump `version:` in [`ouster.repos`](ouster.repos) to a newer upstream release tag.
-2. Bump `msgs.source.ref` in [`rigging.yaml`](rigging.yaml) to the same value — it pins
+1. Rebase the ROS fixes onto a compatible upstream release, run their regressions, and publish
+   the tested commit to our fork. Update `url:` and `version:` in [`ouster.repos`](ouster.repos)
+   to that repository and full commit SHA. Retain a branch containing every pinned commit.
+2. Update both `msgs.source.repo` and `msgs.source.ref` in [`rigging.yaml`](rigging.yaml) to match — they pin
    `ouster_sensor_msgs` (same repo) for the deployment's fleet-ros-msgs overlay; a drifted pin
    means silently skewed schemas in recorded bags.
-3. Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
+3. Run the upstream regression target before rebuilding:
+   `docker build --target upstream-tests -f docker/Dockerfile.runtime .`.
+   Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
    `docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .`).
 4. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
-5. Commit both changes together (e.g. `vendor ouster-ros 0.x.y`).
+5. Commit the manifests and message-source declaration together.
+
+The ROS fork keeps each completed scan's sensor timestamp and ROS message timestamp in the same
+queue slot as its data. Its regression blocks the consumer while subsequent scans complete and
+checks scan/header/per-point timing across the supported timestamp modes. Complete 128-beam,
+2048-column scans also check dimensions and frame-specific range values while queued, using
+sensor and PTP time. These tests do not cover the separate upstream complete-frame origin
+calculation in `TIME_FROM_ROS_TIME`. Keep this patch until an upstream release provides
+equivalent ownership and regression coverage.
+
+Raw packet publishers and subscribers use an explicit reliable, volatile KeepLast
+profile, with `raw_packet_qos_depth: 1024` and `raw_packet_qos_reliability: reliable`
+by default. These startup parameters are independent of processed-output QoS. The
+replay launch supplies matching rosbag QoS overrides for old recordings and custom
+namespaces. The burst regression pauses the actual cloud component's executor,
+queues 0.3 seconds of maximum-rate legacy packets, then checks every point's range
+and relative timestamp plus each IMU timestamp. Both `2048x10` and `1024x20` are
+covered. Live raw publication uses separate lidar and IMU workers with preallocated
+queues (`raw_packet_queue_depth: 1024` per stream, independent of DDS depth). A slow
+raw subscriber can fill that queue and cause counted raw packet drops, but cannot
+block UDP reception through the publish call. Regressions block publication while
+checking actual sensor callbacks, SDK loopback reception, packet ownership, queue
+overflow, independent IMU publication, and shutdown/reactivation. See
+[replay notes](docker/README.md#replay-no-hardware) for capacity and timing limits.
 
 The SDK is independently pinned in [`ouster-sdk.repos`](ouster-sdk.repos). Our fork starts at
-upstream `sdk-0.16.2/ouster-ros-0.15.0` and backports the legacy IMU bounds correction from SDK 1.0
-without changing the API expected by this ROS driver. An SDK-only update does not change
+upstream `sdk-0.16.2/ouster-ros-0.15.0`, backports the legacy IMU bounds correction from SDK 1.0,
+and receives the oversized-datagram detection byte into separate scratch storage. The UDP fix
+preserves packet lengths and oversized-packet rejection without requiring spare capacity in
+callers' buffers, including buffers exchanged by raw ROS publication. ASan regressions cover
+48-byte legacy IMU packets and both 64- and 128-beam legacy lidar packets, including malformed
+lengths, recovery, and preserving buffers already handed to raw publication. The SDK API remains
+compatible with this ROS driver. An SDK-only update does not change
 `ouster_sensor_msgs`, so leave the two ROS source references matched to each other.
-The backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).
+The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).
 
 Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to
 replace an existing `src/ouster-ros`; preserve any local work and select a fresh source directory
