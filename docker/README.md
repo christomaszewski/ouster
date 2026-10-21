@@ -93,6 +93,9 @@ For live capture, verify the negotiated Ethernet speed. Legacy 128-beam `2048x10
 data carries about 255 Mb/s of lidar payload alone (24,896 bytes × 1,280 packets/s).
 It requires a gigabit path; a link negotiated at 100 Mb/s drops data even when the
 sensor clock and packet decoder are correct.
+Processed clouds can be much larger: organized 128-beam clouds with 48-byte points
+at either maximum-rate mode carry about 1.01 Gb/s before middleware overhead.
+Budget downstream links separately from the sensor's raw UDP link.
 
 ## RMW selection / Zenoh
 
