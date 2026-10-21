@@ -77,3 +77,34 @@ colcon --log-base "${test_root}/ros-log" build \
 run_gtest \
   "${test_root}/ros-build/ouster_ros/ouster_ros_lidar_packet_handler_test" \
   ouster_ros_lidar_packet_handler_test
+
+# Exercise the real processing component through middleware with a paused
+# executor, then drain a complete packet burst and check every point/IMU value.
+cmake --build "${test_root}/ros-build/ouster_ros" \
+  --target ouster_ros_raw_packet_qos_test --parallel "${build_jobs}"
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
+  "${test_root}/ros-build/ouster_ros/ouster_ros_raw_packet_qos_test" \
+  ouster_ros_raw_packet_qos_test
+
+# Check QoS upgrades for older bags, namespace remaps, and generated-profile
+# cleanup. Explicitly reject an empty suite if a future pin removes these tests.
+python3 - "${ros_source}/test" "${test_root}/results/replay_packet_launch_test.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+import unittest
+
+report_path = Path(sys.argv[2])
+report_path.unlink(missing_ok=True)
+suite = unittest.defaultTestLoader.discover(
+    sys.argv[1], pattern="test_replay_packet_launch.py")
+if not suite.countTestCases():
+    raise SystemExit("No replay launch regressions found")
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+report_path.write_text(json.dumps({
+    "tests": result.testsRun, "failures": len(result.failures),
+    "errors": len(result.errors), "skipped": len(result.skipped),
+}) + "\n")
+if not result.wasSuccessful() or result.testsRun == len(result.skipped):
+    raise SystemExit("Replay launch regressions failed")
+PY

@@ -238,6 +238,16 @@ sensor and PTP time. These tests do not cover the separate upstream complete-fra
 calculation in `TIME_FROM_ROS_TIME`. Keep this patch until an upstream release provides
 equivalent ownership and regression coverage.
 
+Raw packet publishers and subscribers use an explicit reliable, volatile KeepLast
+profile, with `raw_packet_qos_depth: 1024` and `raw_packet_qos_reliability: reliable`
+by default. These startup parameters are independent of processed-output QoS. The
+replay launch supplies matching rosbag QoS overrides for old recordings and custom
+namespaces. The burst regression pauses the actual cloud component's executor,
+queues 0.3 seconds of maximum-rate legacy packets, then checks every point's range
+and relative timestamp plus each IMU timestamp. Both `2048x10` and `1024x20` are
+covered. See [replay notes](docker/README.md#replay-no-hardware) for bounded queue
+capacity and live reception backpressure tradeoffs.
+
 The SDK is independently pinned in [`ouster-sdk.repos`](ouster-sdk.repos). Our fork starts at
 upstream `sdk-0.16.2/ouster-ros-0.15.0`, backports the legacy IMU bounds correction from SDK 1.0,
 and receives the oversized-datagram detection byte into separate scratch storage. The UDP fix

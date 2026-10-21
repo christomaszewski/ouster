@@ -8,7 +8,8 @@
 # (the fleet-ros-msgs overlay for ouster_sensor_msgs), or source provenance drifts.
 # Based on upstream 0.15.1 (73cf036); keeps each queued scan's timestamps with its data
 # and adds regression coverage for backlog, dropped packets, slot reuse, and
-# complete 128-beam scans.
+# complete 128-beam scans. Raw packet QoS uses explicit bounded queues, with
+# reliable replay and regressions for both maximum-rate legacy lidar modes.
 # Retained by fork branch codex/scan-timestamp-ownership. See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
@@ -16,4 +17,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 4f81034052082a8a0cddc921679bc3167c5db60b
+    version: b2ddc6940f9af79e0506de83ef7a0bd443ca9ce1

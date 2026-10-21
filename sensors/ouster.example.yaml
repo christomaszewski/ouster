@@ -75,7 +75,12 @@ driver_params:
   # Health uses TLM arrivals to detect missing streaming when active; dropping TLM disables that
   # stream check, but HTTP temperature/power/alerts and /diagnostics continue independently.
   # scan_ring: 0                # beam used for LaserScan (SCAN); 0..sensor beam count - 1
-  # use_system_default_qos: false # false = sensor-data QoS; true = ROS system-default QoS
+  # use_system_default_qos: false # processed outputs only: sensor-data vs system-default QoS
+  # raw_packet_qos_depth: 1024   # packet count, 1..65536; restart node to change
+  # raw_packet_qos_reliability: reliable # reliable | best_effort; restart node to change
+  # Raw topics have their own bounded, volatile QoS. Reliable can backpressure live UDP
+  # reception when readers stall; best_effort trades recovery for lower coupling to readers.
+  # Omit RAW from proc_mask when no raw subscriber/recorder needs these topics.
   point_type: original          # original | native | xyz | xyzi | o_xyzi | xyzir |
                                 # xyzrgb | xyzrgba | color_point. Match fields to the packet profile.
   # organized: true             # retain the 2-D beam/column organization

@@ -75,13 +75,19 @@ OUSTER_REPLAY_METADATA=my_capture_metadata.json \
   docker compose -f docker/compose/compose.replay.yaml up
 ```
 
-Check the actual raw-topic subscriber QoS (`ros2 topic info -v /ouster/lidar_packets`,
-adjusting the namespace) before accelerated replay. `use_system_default_qos: true` does
-not guarantee reliable delivery or a deep queue; it resolved to best-effort, depth 1 in
-our replay validation. A reliable publisher alone cannot upgrade that subscriber.
-Bursts can therefore lose whole packets and produce incomplete clouds with zero range
-and point-time fields in missing columns. Pace replay and check column completeness
-before interpreting those zeros as timestamp corruption.
+Raw packets use explicit reliable, volatile, KeepLast QoS with a default depth of 1024
+packets. `raw_packet_qos_depth` (1..65536) and `raw_packet_qos_reliability` (`reliable`
+or `best_effort`) are startup parameters, independent of `use_system_default_qos`,
+which controls processed outputs. The replay launch overrides recorded raw-topic QoS
+to match, including older best-effort bags and custom namespaces. Check the actual
+endpoints with `ros2 topic info -v /ouster/lidar_packets` (adjusting the namespace).
+
+The queue is bounded: 1024 legacy 128-beam lidar packets hold about 24.3 MiB and 0.8 s
+at the maximum packet rate, per endpoint before middleware overhead. A stalled reliable
+reader can backpressure live publication and cause UDP loss upstream; select best-effort
+when that tradeoff is preferable, or omit RAW from `proc_mask` when unused. Bursts that
+exceed queue/processing capacity can still lose data. Check scan completeness before
+interpreting zeros in missing columns as timestamp corruption.
 
 For live capture, verify the negotiated Ethernet speed. Legacy 128-beam `2048x10`
 data carries about 255 Mb/s of lidar payload alone (24,896 bytes × 1,280 packets/s).

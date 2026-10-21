@@ -44,7 +44,7 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             ROS_DISTRO=${{ env.ROS_DISTRO }}
-      - name: Test SDK receive bounds and ROS scan timestamps
+      - name: Test SDK bounds, scan timestamps, and raw packet bursts
         uses: docker/build-push-action@v6
         with:
           context: .
