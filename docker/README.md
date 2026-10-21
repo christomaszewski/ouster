@@ -75,6 +75,19 @@ OUSTER_REPLAY_METADATA=my_capture_metadata.json \
   docker compose -f docker/compose/compose.replay.yaml up
 ```
 
+Check the actual raw-topic subscriber QoS (`ros2 topic info -v /ouster/lidar_packets`,
+adjusting the namespace) before accelerated replay. `use_system_default_qos: true` does
+not guarantee reliable delivery or a deep queue; it resolved to best-effort, depth 1 in
+our replay validation. A reliable publisher alone cannot upgrade that subscriber.
+Bursts can therefore lose whole packets and produce incomplete clouds with zero range
+and point-time fields in missing columns. Pace replay and check column completeness
+before interpreting those zeros as timestamp corruption.
+
+For live capture, verify the negotiated Ethernet speed. Legacy 128-beam `2048x10`
+data carries about 255 Mb/s of lidar payload alone (24,896 bytes × 1,280 packets/s).
+It requires a gigabit path; a link negotiated at 100 Mb/s drops data even when the
+sensor clock and packet decoder are correct.
+
 ## RMW selection / Zenoh
 
 Both images bake two RMWs: `rmw_fastrtps_cpp` (the default) and `rmw_zenoh_cpp`. Every compose
