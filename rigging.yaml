@@ -9,6 +9,8 @@ verbs:
   status: "ps"       # rig may append `--format json` to parse `docker compose ps`
   logs: "logs"
   config: "config"
+  images: "images"
+  runtime-images: "runtime-images"
   # Operational-state contract (all three or none — declaring them IS the support claim). The
   # launcher handles these itself (never compose subcommands): standby = driver process
   # stopped + physical STANDBY; activate wakes the sensor before launching the driver;
@@ -73,4 +75,5 @@ external_volumes:
 launch_surface:
   - ouster-up
   - tools/render_params.py
+  - tools/runtime_images.py
   - docker/compose/compose.deploy.yaml
