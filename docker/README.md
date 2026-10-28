@@ -27,6 +27,13 @@ in generated type support too. A matching library filename alone does not establ
 compatibility. This matters under `rmw_zenoh_cpp` as well: it uses the Fast RTPS type-support
 serialization callbacks, even though the transport is Zenoh.
 
+Neither parent ships rosdep (standalone `ros-core`, or fleet-ros under rig), so both stages
+bootstrap it themselves: `rosdep init` downloads the default sources list and `rosdep update` the
+rosdistro index, both from `raw.githubusercontent.com`. The build fails at that step, with
+rosdep's own error, when the build host cannot reach GitHub; it is never silenced, because a
+silently skipped init only surfaces two layers later as "rosdep has not yet been initialized"
+and a cached `rig build` would keep replaying the broken layer (`rig build --no-cache` evicts it).
+
 ## Build the runtime image
 
 ```bash

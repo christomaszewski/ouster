@@ -45,8 +45,16 @@ RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build ccache git ca-certificates \
       python3-colcon-common-extensions python3-rosdep python3-vcstool \
-  && rm -rf /var/lib/apt/lists/* \
-  && (rosdep init 2>/dev/null || true)
+  && rm -rf /var/lib/apt/lists/*
+# rosdep bootstrap. Neither parent ships rosdep (ros-core standalone; fleet-ros under rig
+# deliberately drops the ros-base IMAGE's rosdep layer), so this is the only step that creates the
+# sources list — and `rosdep init` DOWNLOADS it (raw.githubusercontent.com/ros/rosdistro). It must
+# fail the build with its own error: silenced (`2>/dev/null || true`, the former form), a failed
+# download leaves an "initialized" layer with no sources, the next rosdep call two layers later
+# reports "rosdep has not yet been initialized", and a cached `rig build` keeps replaying that
+# broken layer as good. Guarded only for a parent that already carries the list — the one case
+# where init exits non-zero legitimately (it refuses to overwrite it).
+RUN [ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init
 
 WORKDIR /workspace
 FROM toolchain AS sources
@@ -164,8 +172,9 @@ RUN printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\nAPT::Get::
 # already present and the apt policy holds them at the parent's versions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-rosdep python3-yaml ros-${ROS_DISTRO}-rmw-fastrtps-cpp ros-${ROS_DISTRO}-rmw-zenoh-cpp \
-  && rm -rf /var/lib/apt/lists/* \
-  && (rosdep init 2>/dev/null || true)
+  && rm -rf /var/lib/apt/lists/*
+# rosdep bootstrap, same contract as the toolchain stage's (see its comment): never silenced.
+RUN [ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init
 COPY --from=sources /workspace/src/ouster-ros/ouster-ros/package.xml /tmp/deps/ouster_ros/package.xml
 COPY --from=sources /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tmp/deps/ouster_sensor_msgs/package.xml
 # Wrapper deps and upstream manifest gaps (see the file's header):
