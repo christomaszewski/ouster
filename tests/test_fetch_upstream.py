@@ -39,6 +39,11 @@ class FetchUpstreamTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["repo"], driver["url"])
         self.assertEqual(str(matches[0]["ref"]), str(driver["version"]))
+        # rig exports the rigging's build.sources and build_image.sh accepts only these pins.
+        build_sources = yaml.safe_load((ROOT / "rigging.yaml").read_text())["build"]["sources"]
+        self.assertEqual(build_sources, [
+            {"name": "ouster-ros", "repo": driver["url"], "ref": driver["version"]},
+            {"name": "ouster-sdk", "repo": sdk["url"], "ref": sdk["version"]}])
 
     def repository(self, name, files):
         repo = self.root / name
@@ -72,6 +77,80 @@ class FetchUpstreamTests(unittest.TestCase):
         git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
             "commit", "-qm", "Add submodule fixture")
         return git("rev-parse", "HEAD")
+
+    def exports(self, **trees):
+        """rig's RIG_BUILD_SOURCES layout as the Dockerfile mounts it: one directory per source;
+        an empty mapping leaves that directory empty (the unreplaced default stage)."""
+        root = self.root / "exports"
+        for name in ("ouster-ros", "ouster-sdk"):
+            directory = root / name
+            directory.mkdir(parents=True)
+            for path, contents in trees.get(name.replace("-", "_"), {}).items():
+                (directory / path).parent.mkdir(parents=True, exist_ok=True)
+                (directory / path).write_text(contents)
+        return root
+
+    def pinned_manifests(self):
+        ros_rev, sdk_rev = "1" * 40, "2" * 40
+        # Unreachable URLs: export mode must never fetch.
+        self.manifest("ouster.repos", "ouster-ros", "https://invalid.example/ouster-ros.git", ros_rev)
+        self.manifest("ouster-sdk.repos", "ouster-sdk", "https://invalid.example/ouster-sdk.git", sdk_rev)
+        return ros_rev, sdk_rev
+
+    def test_rig_exports_build_without_fetching(self):
+        ros_rev, sdk_rev = self.pinned_manifests()
+        exports = self.exports(
+            ouster_ros={"ouster-ros/package.xml": "<package/>",
+                        "ouster-ros/ouster-sdk/old": "old bundled SDK"},
+            ouster_sdk={"VERSION": "patched SDK"})
+        with patch.object(fetcher, "run", side_effect=AssertionError("export mode ran a command")):
+            checkout = fetcher.fetch(self.output, self.manifests, exports)
+        installed_sdk = checkout / "ouster-ros/ouster-sdk"
+        self.assertFalse((installed_sdk / "old").exists())
+        self.assertEqual((installed_sdk / "VERSION").read_text(), "patched SDK")
+        sources = json.loads((checkout / "upstream-sources.json").read_text())["sources"]
+        self.assertEqual(sources["ouster-ros"], {"repo": "https://invalid.example/ouster-ros.git",
+                                                 "ref": ros_rev, "rev": ros_rev})
+        self.assertEqual(sources["ouster-sdk"], {"repo": "https://invalid.example/ouster-sdk.git",
+                                                 "ref": sdk_rev, "rev": sdk_rev})
+        # The mounted exports are read-only inputs: they are copied, never moved.
+        self.assertTrue((exports / "ouster-sdk/VERSION").is_file())
+        self.assertFalse(list(self.output.glob(".ouster-fetch-*")))
+
+    def test_empty_exports_clone_the_pins(self):
+        self.pinned_manifests()
+        with patch.object(fetcher, "run", side_effect=RuntimeError("clone")) as run:
+            with self.assertRaisesRegex(RuntimeError, "clone"):
+                fetcher.fetch(self.output, self.manifests, self.exports())
+        self.assertEqual(run.call_args.args[:2], ("vcs", "import"))
+
+    def test_partial_exports_are_refused(self):
+        self.pinned_manifests()
+        exports = self.exports(ouster_ros={"ouster-ros/package.xml": "<package/>"})
+        with self.assertRaisesRegex(ValueError, "incomplete .*ouster-sdk"):
+            fetcher.fetch(self.output, self.manifests, exports)
+        self.assertFalse((self.output / "ouster-ros").exists())
+
+    def test_exports_need_commit_pins(self):
+        self.pinned_manifests()
+        self.manifest("ouster.repos", "ouster-ros", "https://invalid.example/ouster-ros.git", "0.15.1")
+        exports = self.exports(ouster_ros={"ouster-ros/package.xml": "<package/>"},
+                               ouster_sdk={"VERSION": "patched SDK"})
+        with self.assertRaisesRegex(ValueError, "full commit SHA"):
+            fetcher.fetch(self.output, self.manifests, exports)
+        self.assertFalse((self.output / "ouster-ros").exists())
+
+    def test_msgs_provenance_records_the_commit_built(self):
+        ros_rev, _ = self.pinned_manifests()
+        exports = self.exports(ouster_ros={"ouster-ros/package.xml": "<package/>"},
+                               ouster_sdk={"VERSION": "patched SDK"})
+        checkout = fetcher.fetch(self.output, self.manifests, exports)
+        output = fetcher.write_msgs_provenance(checkout, self.root / "fleet-msgs/provenance.yaml",
+                                               ["ouster_sensor_msgs"])
+        # The schema `rig image audit` parses (rig-infra msgs/provenance-record.sh's).
+        self.assertEqual(yaml.safe_load(output.read_text()), {"version": 1, "source": [{
+            "repo": "https://invalid.example/ouster-ros.git", "ref": ros_rev, "rev": ros_rev,
+            "packages": ["ouster_sensor_msgs"]}]})
 
     def test_existing_checkout_is_never_replaced(self):
         checkout = self.output / "ouster-ros"

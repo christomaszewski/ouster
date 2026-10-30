@@ -57,12 +57,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN [ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init
 
 WORKDIR /workspace
+
+# rig's exports of rigging.yaml `build.sources` (rig >= v0.2.74): tools/build_image.sh passes each
+# pinned tree, exported from rig's local git mirror, as a named build context, which REPLACES the
+# empty stage of that name below. That is what lets `rig build --offline` build without
+# fetching. Standalone and hand-run builds leave the stages empty, and the helper clones instead.
+# The two trees match except for .git and what an export's own .dockerignore drops (the SDK's
+# excludes its unbuilt python/Dockerfile). Without .git the SDK's build header reports its git
+# hash as "unknown"; upstream-sources.json and the provenance file still carry the exact commits.
+FROM scratch AS ouster-ros
+FROM scratch AS ouster-sdk
+
 FROM toolchain AS sources
-# Fetch both exact source versions. The helper replaces the SDK only inside a fresh checkout,
-# fails on fetch/submodule errors, and records the actual commits used by this build.
+# Fetch both exact source versions (or take rig's exports of them). The helper replaces the SDK
+# only inside a fresh checkout, fails on fetch/submodule errors, and records the actual commits
+# used by this build.
+#
+# fleet-msgs provenance (rig image audit >= v0.2.30): the same step records what the checkout
+# ACTUALLY used for the ouster_sensor_msgs interfaces (declared repo and ref plus the commit
+# built) at the one well-known path audit probes. They come from upstream-sources.json, i.e. from
+# ouster.repos, never re-typed from rigging.yaml's msgs declaration (a re-echo would make the audit
+# compare the declaration against itself, hiding real drift). The schema is rig-infra's
+# msgs/provenance-record.sh's; that helper reads the commit from git, which an export lacks. The
+# build stage must COPY the file out: provenance dying with this throwaway stage is the
+# doctrine's default failure mode.
 COPY ouster.repos ouster-sdk.repos /workspace/
 COPY tools/fetch_upstream.py /workspace/tools/fetch_upstream.py
-RUN python3 /workspace/tools/fetch_upstream.py /workspace/src
+RUN --mount=type=bind,from=ouster-ros,target=/tmp/build-sources/ouster-ros \
+    --mount=type=bind,from=ouster-sdk,target=/tmp/build-sources/ouster-sdk \
+    python3 /workspace/tools/fetch_upstream.py /workspace/src --exports /tmp/build-sources \
+      --msgs-provenance /opt/fleet-msgs/provenance.yaml --msgs-package ouster_sensor_msgs
 # Use the same package discovery as rosdep, including package/ignore boundaries.
 # Copy all discovered manifests so future source packages cannot silently lose deps.
 RUN python3 - <<'PY'
@@ -75,19 +99,6 @@ for relative in find_packages(str(root)):
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / relative / 'package.xml', target)
 PY
-
-# fleet-msgs provenance (rig image audit ≥ v0.2.30): record what the checkout above ACTUALLY used
-# for the ouster_sensor_msgs interfaces — declared ref + resolved commit SHA — at the one
-# well-known path audit probes. url/ref are parsed from ouster.repos, the very file `vcs import`
-# consumed, never re-typed from rigging.yaml's msgs declaration (a re-echo would make the audit
-# compare the declaration against itself, hiding real drift). The runtime stage must COPY the file
-# out — provenance dying with this throwaway stage is the doctrine's default failure mode.
-# Helper is vendored from rig-infra msgs/provenance-record.sh.
-COPY docker/provenance-record.sh /usr/local/bin/provenance-record.sh
-RUN url="$(awk '$1 == "url:" {print $2}' /workspace/ouster.repos)" \
- && ref="$(awk '$1 == "version:" {print $2}' /workspace/ouster.repos)" \
- && sh /usr/local/bin/provenance-record.sh /opt/fleet-msgs/provenance.yaml \
-      "$url" "$ref" /workspace/src/ouster-ros ouster_sensor_msgs
 
 # Copy only manifests into the dependency stage: a source pin change with identical
 # dependencies must not reinstall the large PCL/OpenCV build toolchain.

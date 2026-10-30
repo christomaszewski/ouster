@@ -17,7 +17,7 @@ supervisor, Docker, compose, and the `rig` descriptor.
 |-------|------|
 | `ouster.repos` | Pins our ROS 0.15.1-based fork with per-scan timestamp ownership and regression tests. |
 | `ouster-sdk.repos` | Pins the ROS-compatible SDK fork containing legacy IMU bounds and UDP receive-buffer fixes. |
-| `tools/fetch_upstream.py` | Fetches both pins into a fresh checkout, replaces the bundled SDK, and records their actual revisions. |
+| `tools/fetch_upstream.py` | Fetches both pins into a fresh checkout (or takes rig's exports of them), replaces the bundled SDK, and records their actual revisions and the fleet-msgs provenance. |
 | `tools/render_params.py` | Maps a generic rig sensor config (`connection` + `driver_params`) → upstream's `driver_params.yaml` keys. Keyed by the `/**` wildcard so it binds at any namespace. |
 | `docker/compose/compose.deploy.yaml` | Runs the supervisor, which starts upstream's unmodified headless launch only after the sensor is running. |
 | `docker/entrypoints/operational_state.py` | Serializes mode changes, owns the driver process group, and reconciles the requested state after failures. |
@@ -93,6 +93,21 @@ architecture for standalone builds; Rig's `RIG_BUILD_PLATFORMS` takes precedence
 reports the published digest through `RIG_BUILD_RESULT`. Rig uses `OUSTER_IMAGE`
 to select the catalog image by digest during deployment and reconstruction.
 
+With Rig v0.2.74 or later the image build clones nothing itself. The rigging's
+`build.sources` declares the two pinned repositories, rig serves them from its local git
+mirrors, and `build_image.sh` passes them to the Dockerfile as named build contexts. To build
+without a network, mirror them once while online, then build offline:
+
+```bash
+rig src sync
+rig build --offline
+```
+
+Image layers still come from the build cache, so an offline build needs one earlier online build
+of the same apt and rosdep steps. Under rig the SDK's build header reports its git hash as
+`unknown` because exported trees carry no `.git`. The exact commits remain in
+`/opt/ouster_driver/share/upstream-sources.json` and `/opt/fleet-msgs/provenance.yaml`.
+
 Ordinary Rig bag replay republishes the recorded Ouster topics through the bag
 player and does not start this sensor-tier driver by default. Explicitly selecting
 the live driver still requires a reachable sensor. The separate raw-packet replay
@@ -109,6 +124,10 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
 - `connection.type: lidar` with `connection.lidar.{sensor_hostname, udp_dest, lidar_port, imu_port}`
   — mapped onto the upstream params by `render_params.py`.
 - `ros.namespace` — becomes `ouster_ns` (so topics are `/<ns>/points`, `/<ns>/imu`, …).
+  It defaults to the instance name, which is also the namespace rig assumes when it associates
+  topics with instances (`rig graph`, replay topic ownership). A per-config namespace cannot be
+  declared in `rigging.yaml`, so when you set a different one, give replay recipes
+  `instances.<name>.recorded_namespace: /<ns>`.
 - `driver_params` — copied **verbatim** into `ros__parameters`; any key from upstream
   `config/driver_params.yaml` works (`lidar_mode`, `timestamp_mode`, `udp_profile_lidar`,
   `point_type`, `sensor_frame`/`lidar_frame`/`imu_frame`, `attempt_reconnect`, …). Do **not** put
@@ -254,7 +273,9 @@ router — that is rig-managed infrastructure the session connects out to (endpo
    to that repository and full commit SHA. Retain a branch containing every pinned commit.
 2. Update both `msgs.source.repo` and `msgs.source.ref` in [`rigging.yaml`](rigging.yaml) to match — they pin
    `ouster_sensor_msgs` (same repo) for the deployment's fleet-ros-msgs overlay; a drifted pin
-   means silently skewed schemas in recorded bags.
+   means silently skewed schemas in recorded bags. Update the matching `build.sources` entry
+   too (and the `ouster-sdk` one when `ouster-sdk.repos` changes): rig exports exactly those
+   refs, and `build_image.sh` refuses an export that differs from the manifests.
 3. Run the upstream regression target before rebuilding:
    `docker build --target upstream-tests -f docker/Dockerfile.runtime .`.
    Rebuild: `tools/build_image.sh <registry> [tag]` (or, local-only:
@@ -308,9 +329,11 @@ Keep SDK overrides compatible with the selected ROS source. If `driver.launch.py
 (`params_file`, `ouster_ns`, `viz`) or `driver_params.yaml` keys are renamed, update
 `tools/render_params.py`, `docker/compose/compose.deploy.yaml`, and the healthcheck node name.
 
-**LAN mirror (later):** change only `url:` in `ouster.repos` (keep `version:`). For a *fully* offline
-build you also need an apt/rosdep mirror — the dependency install is a separate network dependency
-from the source fetch.
+**LAN mirror:** under rig, `rig src sync` keeps both source pins in rig's local git mirrors (see
+[Portable Rig builds and replay](#portable-rig-builds-and-replay)). For standalone builds, change
+only `url:` in the manifests (keep `version:`). A *fully* offline build from a cold cache also
+needs an apt/rosdep mirror: the dependency install is a separate network dependency from the
+source fetch.
 
 ## Releasing
 

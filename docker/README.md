@@ -5,6 +5,9 @@ Two images over the same ROS 2 Lyrical base. Unlike the in-house drivers in this
 [`../ouster.repos`](../ouster.repos) and [`../ouster-sdk.repos`](../ouster-sdk.repos).
 The shared `tools/fetch_upstream.py` helper applies the SDK override and records both commits;
 the runtime retains that record at `/opt/ouster_driver/share/upstream-sources.json`.
+Under rig v0.2.74 or later the build fetches nothing itself: rig exports both pins from its local
+git mirrors (rigging.yaml `build.sources`) and `tools/build_image.sh` passes them in as the
+`ouster-ros` and `ouster-sdk` named build contexts.
 
 | Image | What | When |
 |---|---|---|
@@ -46,7 +49,10 @@ docker buildx build --platform linux/arm64 -f docker/Dockerfile.runtime -t ouste
 Under rig, `build_image.sh` follows the rig build-env contract: `RIG_BASE_IMAGE` re-parents the
 build and runtime stages onto the deployment's shared base (fleet-ros), `ROS_DISTRO` forwards the fleet
 distro, and `RIG_BUILD_NO_CACHE` maps to `--no-cache --pull` — the deliberate way the parent
-image (the fleet's ros-* version authority) advances. Both stages use `apt-mark hold` for the
+image (the fleet's ros-* version authority) advances. `RIG_BUILD_SOURCES` carries rig's exports
+of the two source pins. The script refuses an export whose repository or commit differs from
+`ouster.repos` or `ouster-sdk.repos`, then passes each as a named build context that replaces the
+Dockerfile's empty stage of the same name. Without it the build clones the pins as before. Both stages use `apt-mark hold` for the
 parent's ROS packages: `APT::Get::Upgrade "false"` alone does not prevent dependency-driven
 upgrades. A dependency requiring newer held ROS packages fails the build; refresh the fleet
 base deliberately in that case. The final check also compares installed ROS packages against

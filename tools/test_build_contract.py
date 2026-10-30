@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,13 @@ PLATFORM_ENV = "OUSTER_BUILD_PLATFORM"
 DIGEST = "sha256:" + "a" * 64
 
 
+def manifest_pin(name):
+    """(url, version) from a .repos manifest, read the way build_image.sh reads it (no PyYAML on
+    this job's runner)."""
+    text = (ROOT / name).read_text()
+    return tuple(re.search(rf"^\s*{key}:\s*(\S+)", text, re.M).group(1) for key in ("url", "version"))
+
+
 class BuildContractTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -24,6 +32,8 @@ class BuildContractTests(unittest.TestCase):
         (self.repo / "tools").mkdir(parents=True)
         for name in ("build_image.sh", "rig-build.sh"):
             shutil.copy2(ROOT / "tools" / name, self.repo / "tools" / name)
+        for name in ("ouster.repos", "ouster-sdk.repos"):
+            shutil.copy2(ROOT / name, self.repo / name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         docker = self.bin / "docker"
@@ -148,6 +158,51 @@ if "--metadata-file" in args:
         self.assertIn("--no-cache", build)
         self.assertNotIn("--pull", build)
         self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
+
+    def build_sources(self, **commits):
+        """A RIG_BUILD_SOURCES directory as rig exports it: one tree per rigging build.sources
+        entry plus sources.tsv (name, repo, ref, commit), pinned like the .repos manifests unless
+        a commit is overridden (None leaves that source out)."""
+        exports = self.root / "rig sources"
+        exports.mkdir(exist_ok=True)
+        rows = []
+        for name, manifest in (("ouster-ros", "ouster.repos"), ("ouster-sdk", "ouster-sdk.repos")):
+            url, version = manifest_pin(manifest)
+            commit = commits.get(name.replace("-", "_"), version)
+            if commit is None:
+                continue
+            (exports / name).mkdir()
+            (exports / name / "marker").write_text(name)
+            rows.append(f"{name}\t{url}\t{version}\t{commit}\n")
+        (exports / "sources.tsv").write_text("".join(rows))
+        return exports
+
+    def test_rig_build_sources_become_named_contexts(self):
+        exports = self.build_sources()
+        for platforms in ("", "linux/arm64,linux/amd64"):
+            with self.subTest(platforms=platforms):
+                build = self.successful_build(RIG_BUILD_SOURCES=str(exports),
+                                              RIG_BUILD_PLATFORMS=platforms,
+                                              RIG_BUILD_RESULT=str(self.report))[0]
+                contexts = [build[i + 1] for i, arg in enumerate(build) if arg == "--build-context"]
+                self.assertEqual(contexts, [f"ouster-ros={exports}/ouster-ros",
+                                            f"ouster-sdk={exports}/ouster-sdk"])
+
+    def test_standalone_builds_pass_no_named_contexts(self):
+        build, _ = self.successful_build()
+        self.assertNotIn("--build-context", build)
+
+    def test_build_source_at_another_commit_is_refused(self):
+        result, calls = self.run_build(RIG_BUILD_SOURCES=str(self.build_sources(ouster_sdk="f" * 40)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("keep rigging.yaml build.sources matched to ouster-sdk.repos", result.stderr)
+        self.assertEqual(calls, [])
+
+    def test_undeclared_build_source_is_refused(self):
+        result, calls = self.run_build(RIG_BUILD_SOURCES=str(self.build_sources(ouster_ros=None)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no 'ouster-ros' export", result.stderr)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
