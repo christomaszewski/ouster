@@ -10,6 +10,12 @@
 #   RIG_BUILD_NO_CACHE  set => --no-cache --pull. --pull matters: a deliberate `rig build
 #                       --no-cache` re-pulls the parent image, so the fleet's ros-* version
 #                       authority advances for all images together (see docker/Dockerfile.runtime).
+#   RIG_BUILD_PULL      0 => no --pull (`rig build --offline` sets it, with RIG_OFFLINE=1).
+#   RIG_BUILD_SOURCES   rig >= v0.2.74: rigging.yaml `build.sources` exported from rig's local git
+#                       mirrors (one directory per source plus sources.tsv: name, repo, ref,
+#                       commit). Passed as the Dockerfile's ouster-ros/ouster-sdk named build
+#                       contexts, so the image build fetches no git. Each export must be exactly the
+#                       repo and commit ouster.repos / ouster-sdk.repos pin. Unset = clone in the build.
 #   ROS_DISTRO          fleet distro (vehicle.yaml ros.distro); default lyrical.
 #   RIG_BASE_IMAGE      the deployment's one runtime base image (fleet-ros), forwarded to every
 #                       dependent build; empty/absent falls back to the standalone ros-core parent.
@@ -36,6 +42,28 @@ if [ -n "${RIG_BUILD_NO_CACHE:-}" ]; then
 fi
 if [ -z "${RIG_BUILD_PLATFORMS:-}" ] && [ -n "${OUSTER_BUILD_PLATFORM:-}" ]; then
   set -- --platform "$OUSTER_BUILD_PLATFORM" "$@"
+fi
+# rig's exports of build.sources. rig resolves the RIGGING's refs, so a rigging that drifted from
+# the .repos manifests fails here instead of building one commit while provenance records another.
+if [ -n "${RIG_BUILD_SOURCES:-}" ]; then
+  for pair in ouster-ros:ouster.repos ouster-sdk:ouster-sdk.repos; do
+    name="${pair%%:*}" manifest="${pair#*:}"
+    url="$(awk '$1 == "url:" {print $2}' "$REPO/$manifest")"
+    pin="$(awk '$1 == "version:" {print $2}' "$REPO/$manifest")"
+    row="$(awk -F '\t' -v n="$name" '$1 == n' "$RIG_BUILD_SOURCES/sources.tsv" 2>/dev/null || true)"
+    if [ -z "$row" ] || [ ! -d "$RIG_BUILD_SOURCES/$name" ]; then
+      echo "build_image.sh: RIG_BUILD_SOURCES carries no '$name' export;" \
+           "declare it in rigging.yaml build.sources" >&2
+      exit 1
+    fi
+    IFS=$'\t' read -r _ repo _ commit <<<"$row"
+    if [ "$repo" != "$url" ] || [ "$commit" != "$pin" ]; then
+      echo "build_image.sh: rig exported $name as $repo @ $commit, but $manifest pins" \
+           "$url @ $pin; keep rigging.yaml build.sources matched to $manifest" >&2
+      exit 1
+    fi
+    set -- "$@" --build-context "$name=$RIG_BUILD_SOURCES/$name"
+  done
 fi
 rig_build "$IMAGE" "$@" \
   --build-arg "ROS_DISTRO=${ROS_DISTRO:-lyrical}" \
