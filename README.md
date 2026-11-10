@@ -33,21 +33,32 @@ state, sensor operating mode/status, and driver state; it does not measure data 
 
 ```
 ouster/
-├── ouster.repos              # upstream pin (vcstool)
+├── ouster.repos              # ROS driver pin: our fork, full commit SHA
 ├── ouster-sdk.repos          # explicit SDK override (full commit SHA)
 ├── rigging.yaml              # rig descriptor
 ├── ouster-up                 # rig launcher (networked; no serial branch)
 ├── sensors/ouster.example.yaml
 ├── tools/
 │   ├── render_params.py      # generic rig config -> ouster driver_params.yaml
-│   └── build_image.sh        # rig build phase: build + push runtime image
+│   ├── fetch_upstream.py     # fetch both pins (or take rig's exports), record what was built
+│   ├── runtime_images.py     # launcher helper: the compose model's images and rig's digest pins
+│   ├── build_image.sh        # rig build phase: build + push runtime image
+│   ├── rig-build.sh          # rig build contract helper sourced by build_image.sh
+│   ├── test_build_contract.py  # build_image.sh's docker arguments, checked without a daemon
+│   └── test_upstream.sh      # upstream regressions (the Dockerfile's upstream-tests target)
 ├── docker/
-│   ├── Dockerfile.runtime    # multi-stage: vcs import + rosdep + colcon (Release)
-│   ├── Dockerfile.dev
+│   ├── Dockerfile.runtime    # multi-stage: fetch_upstream.py + rosdep + colcon (Release)
+│   ├── Dockerfile.dev        # dev toolchain; .devcontainer.json mirrors it
+│   ├── check_runtime.py      # image-build gate: build/runtime ROS packages agree, libraries load
+│   ├── ament_target_dependencies_compat.cmake  # Lyrical shim for upstream's CMake
+│   ├── runtime_extra_deps/package.xml          # exec deps upstream's manifests leave out
 │   ├── entrypoints/{ros-entrypoint,healthcheck,statectl}.sh
-│   ├── entrypoints/{operational_state,sensor_http}.py
+│   ├── entrypoints/{operational_state,sensor_http}.py   # supervisor and its sensor HTTP client
+│   ├── entrypoints/{health,health_ros,lifecycle_ros}.py # diagnostics, the health node, lifecycle calls
 │   └── compose/{compose.deploy,compose.dev,compose.replay}.yaml
-└── src/                      # GITIGNORED — upstream fetched here by `vcs import` / the build
+├── docs/SERVICE_HEALTH.md    # sensor and service health specification shared with the dashboard
+├── tests/                    # python3 -m unittest discover -s tests (ROS parts run in the image)
+└── src/                      # GITIGNORED — upstream fetched here by tools/fetch_upstream.py
 ```
 
 ## Quick start (local dev, no rig)
@@ -166,7 +177,8 @@ ros2 topic echo /top/temperature sensor_msgs/msg/Temperature
 **Hardware limit:** the [FW 2.4 manual, §13.4.3 (p. 126)](https://data.ouster.io/downloads/software-user-manual/firmware-user-manual-v2.4.0.pdf)
 documents internal temperature for **Rev 06 and newer** sensors only. A Rev 4/5 OS1 therefore
 cannot be assumed to provide readings. Missing/null/invalid values or HTTP failures skip the
-sample and log a warning at most once per minute; polling continues without affecting the
+sample, and the `temperature` component on `/diagnostics` says why (`measurement unavailable`,
+or `health.error` while the request is failing); polling continues without affecting the
 operational state. No zero or previous reading is substituted. `sensor_msgs` is a standard ROS
 interface, so recording this topic needs no additional fleet message package.
 

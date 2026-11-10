@@ -1,7 +1,6 @@
 """Firmware-aware, non-persistent sensor mode changes (FW 2.3+)."""
 
 import json
-import math
 import re
 import time
 import urllib.error
@@ -77,16 +76,6 @@ class SensorHTTP:
         if not isinstance(alerts, dict) or not isinstance(alerts.get("active"), list):
             raise SensorError("invalid sensor alerts response")
         return alerts
-
-    def temperature(self):
-        """Compatibility accessor; reporting uses telemetry() once for all measurements."""
-        telemetry = self.telemetry()
-        value = telemetry.get("internal_temperature_deg_c")
-        if value is None:
-            raise SensorError("internal temperature unavailable (requires Rev 06 or newer hardware)")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise SensorError("invalid internal_temperature_deg_c in sensor telemetry")
-        return float(value)
 
     @staticmethod
     def check_cancelled(stop_event):

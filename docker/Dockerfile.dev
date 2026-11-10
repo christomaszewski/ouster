@@ -26,8 +26,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
       ros-${ROS_DISTRO}-rmw-zenoh-cpp \
       sudo tmux vim-nox \
-    && rm -rf /var/lib/apt/lists/* \
- && (rosdep init 2>/dev/null || true)
+    && rm -rf /var/lib/apt/lists/*
+# rosdep bootstrap, same contract as Dockerfile.runtime's: `rosdep init` downloads the sources
+# list and must fail the build with its own error when that fails. Silenced, a failed download
+# left an image whose first `rosdep install` reports "rosdep has not yet been initialized".
+# Guarded only for a parent that already carries the list (the ros-base image does), the one
+# case where init exits non-zero legitimately.
+RUN [ -f /etc/ros/rosdep/sources.list.d/20-default.list ] || rosdep init
 
 # --- Non-root dev user (UID/GID matched to the host) ------------------------
 # The base image ships a default user at UID/GID 1000; reuse/rename/retarget it to ${USER} so files

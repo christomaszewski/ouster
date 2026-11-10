@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from test_operational_state import FakeClock, FakeDriver, Firmware, SensorHTTP, operational
+from test_operational_state import FakeClock, FakeDriver, Firmware, SensorError, SensorHTTP, operational
 from health import HealthReporter, telemetry_values, config, ERROR, STALE
 from health_ros import ros_values
 
@@ -35,6 +35,51 @@ class HealthTests(unittest.TestCase):
         for bad in (True, "758", float("nan"), float("inf"), None):
             values = telemetry_values({"input_voltage_mv": 24000, "input_current_ma": bad})
             self.assertIsNone(values["supply.power_w"])
+
+    def test_telemetry_is_one_bounded_read_only_request(self):
+        firmware = Firmware("v2.4.0")
+        firmware.telemetry.update(input_current_ma=758, input_voltage_mv=23606,
+                                  phase_lock_status="DISABLED", timestamp_ns=2962666299310)
+        with patch("urllib.request.urlopen", side_effect=firmware) as request:
+            values = telemetry_values(SensorHTTP("sensor").telemetry())
+        self.assertEqual(values["temp.internal_c"], 45)  # degrees Celsius, as the sensor reports it
+        self.assertEqual(firmware.calls, [("GET", "/api/v1/sensor/telemetry", "")])
+        self.assertEqual(request.call_args.kwargs["timeout"], 2)
+        self.assertEqual(firmware.active, firmware.persisted)
+        with patch.object(SensorHTTP, "request", return_value="[]"), self.assertRaises(SensorError):
+            SensorHTTP("sensor").telemetry()
+
+    def test_invalid_temperature_is_unavailable_and_zero_or_negative_is_a_reading(self):
+        for payload in ({}, *({"internal_temperature_deg_c": value}
+                              for value in (None, True, "45", float("nan"), float("inf")))):
+            with self.subTest(payload=payload):
+                values = telemetry_values(payload)
+                self.assertIsNone(values["temp.internal_c"])
+                self.assertEqual(values["health.metric.temp.internal_c.state"], "unavailable")
+        for value in (0, -12.5, 48.25):
+            with self.subTest(value=value):
+                values = telemetry_values({"internal_temperature_deg_c": value})
+                self.assertEqual(values["temp.internal_c"], value)
+                self.assertNotIn("health.metric.temp.internal_c.state", values)
+
+    def test_only_a_fresh_reading_is_handed_on_for_the_temperature_topic(self):
+        self.assertEqual(self.reporter.collect(self.sensor, self.changing), 42)
+        self.sensor.telemetry.side_effect = OSError("disconnected")
+        self.assertIsNone(self.reporter.collect(self.sensor, self.changing), "a failed read replays nothing")
+        self.sensor.telemetry.side_effect = None
+        self.sensor.telemetry.return_value = {"input_voltage_mv": 24000, "input_current_ma": 700}
+        self.assertIsNone(self.reporter.collect(self.sensor, self.changing), "no reading is not zero")
+
+        def read_during_transition():
+            self.changing.set()
+            return {"internal_temperature_deg_c": 50}
+
+        self.sensor.telemetry.side_effect = read_during_transition
+        polls = self.sensor.alerts.call_count
+        self.assertIsNone(self.reporter.collect(self.sensor, self.changing))
+        self.assertEqual(self.sensor.alerts.call_count, polls, "a transition that began mid-read ends the poll")
+        self.assertIsNone(self.rows()["temperature"]["values"]["temp.internal_c"],
+                          "the overtaken read must not replace the last sample")
 
     def test_failures_retain_age_sample_identity_and_last_error_then_recover(self):
         self.reporter.settings["limits"] = {"temp.internal_c": {"error_above": 40}}

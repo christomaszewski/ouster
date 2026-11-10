@@ -167,6 +167,14 @@ RUN --mount=type=cache,id=ouster-ccache-${ROS_DISTRO}-${TARGETARCH},target=/root
  && ccache --show-stats
 # Record the actual compiler environment, including deps absent from the parent. The final
 # stage compares all overlapping ROS packages, catching stale independently cached apt layers.
+# ROS packages only, on purpose. The apt steps above also move a few non-ROS packages past the
+# parent (perl-base, ca-certificates and libpcre2-8-0 when this was written): the tools they
+# install depend on newer versions, and APT::Get::Upgrade "false" only keeps packages named on
+# the command line where they are. None of that reaches the runtime stage. What the runtime
+# needs from non-ROS libraries is that every shipped binary resolves and loads against its own
+# copies, which the ldd gate and the eager-load check there establish. Requiring equal versions
+# as well would fail this build every time Ubuntu updates such a package before the parent
+# image is refreshed.
 RUN dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Status}\n' 'ros-*' \
       | awk '$3 == "installed" {print $1 "\t" $2}' > /workspace/build-ros-packages.tsv
 
@@ -264,7 +272,7 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
-COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/temperature.py docker/entrypoints/health.py docker/entrypoints/health_ros.py docker/entrypoints/lifecycle_ros.py /usr/local/bin/
+COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/health.py docker/entrypoints/health_ros.py docker/entrypoints/lifecycle_ros.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
