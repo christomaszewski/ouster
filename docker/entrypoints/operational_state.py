@@ -131,9 +131,7 @@ class Controller:
         self.sensor = sensor
         self.driver = driver
         self.target_file = Path(target_file)
-        self.target = self.target_file.read_text().strip() if self.target_file.exists() else initial
-        if self.target not in ("active", "standby"):
-            raise ValueError(f"invalid saved target state: {self.target!r}")
+        self.target = self.saved_target() or initial
         self.clock = clock
         self.stop_event = stop_event or threading.Event()
         self.lock = threading.Lock()
@@ -146,11 +144,41 @@ class Controller:
         # Atomic dict replacement; never wait on transition locks or HTTP here.
         return {**self.observation, "target": self.target, "error": self.error}
 
+    def saved_target(self):
+        """The target a runtime request left behind, or None. The file lives in the container,
+        so an unusable one (truncated by a power cut, unreadable) would otherwise stop every
+        restart of the same container at this line: fall back to the configured target, as a
+        newly created container would, and say so."""
+        try:
+            saved = self.target_file.read_text().strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError) as error:
+            LOG.warning("ignoring unreadable saved target state %s: %s", self.target_file, error)
+            return None
+        if saved in ("active", "standby"):
+            return saved
+        LOG.warning("ignoring invalid saved target state %r in %s", saved[:40], self.target_file)
+        return None
+
     def save_target(self, target):
         self.target_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.target_file.with_suffix(".tmp")
-        temporary.write_text(target + "\n")
+        # The rename is only atomic for what has reached the disk: flush the bytes, then the
+        # directory entry, so a power cut leaves the old target or the new one, never an empty file.
+        with temporary.open("w") as stream:
+            stream.write(target + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(self.target_file)
+        try:
+            directory = os.open(self.target_file.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as error:  # the request is accepted either way; only its durability is weaker
+            LOG.warning("could not sync %s: %s", self.target_file.parent, error)
         self.target = target
 
     def pause(self, seconds):

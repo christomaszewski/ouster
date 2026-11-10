@@ -301,6 +301,36 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(restarted.state()["state"], "standby")
         self.assertNotIn("driver:start", self.events)
 
+    def test_unusable_saved_target_falls_back_to_the_configured_state(self):
+        """A restart must not stop at the saved file: it lives in the container, so an empty or
+        garbled one (a power cut between write and sync) would otherwise fail every restart."""
+        for content in (b"", b"\n", b"parked\n", b"\xff\xfe\x00binary", b"active standby\n"):
+            with self.subTest(content=content):
+                self.target_file.write_bytes(content)
+                with self.assertLogs("ouster-state", "WARNING") as logs:
+                    controller = operational.Controller(self.sensor, self.driver, "standby", self.target_file)
+                self.assertEqual(controller.target, "standby")
+                self.assertIn("saved target state", logs.output[0])
+                controller.transition("active")  # and the next request repairs the file
+                self.assertEqual(self.target_file.read_text(), "active\n")
+                self.driver.process = None
+        self.target_file.unlink()
+        self.target_file.mkdir()  # unreadable in another way
+        with self.assertLogs("ouster-state", "WARNING"):
+            self.assertEqual(operational.Controller(self.sensor, self.driver, "active",
+                                                    self.target_file).target, "active")
+
+    def test_saved_target_reaches_the_disk_before_it_replaces_the_old_one(self):
+        events = []
+        real_replace = Path.replace
+        with patch.object(operational.os, "fsync", side_effect=lambda fd: events.append("fsync")), \
+                patch.object(Path, "replace", autospec=True,
+                             side_effect=lambda src, dst: (events.append("replace"), real_replace(src, dst))[1]):
+            self.controller.save_target("active")
+        self.assertEqual(events, ["fsync", "replace", "fsync"])
+        self.assertEqual(self.target_file.read_text(), "active\n")
+        self.assertFalse(self.target_file.with_suffix(".tmp").exists())
+
     def test_power_cycle_to_normal_is_reparked(self):
         self.sensor.mode, self.sensor.status = "NORMAL", "RUNNING"
         self.controller.transition()
