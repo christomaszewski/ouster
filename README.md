@@ -382,8 +382,11 @@ every message. The driver publishes one message per lidar packet (640 to 1,280 p
 health node keeps only the newest in a depth-1 subscription that its executor never waits on,
 and each heartbeat takes it without deserializing. Measured in the runtime image on a 2.3 GHz
 x86-64 core with Fast DDS, a Python callback per packet cost 20% of a core at 640 packets/s and
-32% at 1,280; sampling costs 2% and 3%. `packets.received` therefore counts heartbeats that
-found a new packet, not packets, and a stopped stream is reported one heartbeat later at most.
+32% at 1,280; sampling costs 2% and 3%. With `rmw_zenoh_cpp` and a router the callback cost 22%
+and 39% and sampling costs 5% and 9%: that middleware still receives every message in the
+process, which only dropping the subscription would avoid. `packets.received` therefore counts
+heartbeats that found a new packet, not packets, and a stopped stream is reported one heartbeat
+later at most.
 
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,

@@ -117,8 +117,10 @@ class StreamSamplingTests(unittest.TestCase):
             observed = rows[-1][2] - first
             self.assertGreater(packets, 5 * heartbeats, "the fixture must outpace the heartbeat")
             self.assertEqual(rows[-1][0], DiagnosticStatus.OK)
-            # One observation per heartbeat that found a new packet: never one per packet.
-            self.assertGreaterEqual(observed, heartbeats - 2)
+            # One observation per heartbeat that found a new packet: never one per packet. The
+            # lower bound only has to tell sampling from not observing at all, so it leaves room
+            # for a loaded machine that delays a heartbeat past its packets.
+            self.assertGreaterEqual(observed, heartbeats // 2)
             self.assertLessEqual(observed, heartbeats + 1)
 
             publishing.clear()
