@@ -125,12 +125,12 @@ caches remain outside the runtime image.
 ### Rebuilds under `rig build` (2026-11-10)
 
 Every step of this Dockerfile is keyed on the digest of `BASE_IMAGE`. Under rig that is the
-deployment's base image by digest, and rig v0.2.81 hands over a new digest after every base
-build, including one whose steps were all cached: the index it publishes carries a provenance
-attestation that is unique to the build. BuildKit then runs every step here again although
-nothing changed, and the image it publishes has new layers each time. A rig that keeps the
-digest of an unchanged base (proposed for the release after v0.2.81) removes that; the cache
-mounts above cover the rebuilds that remain legitimate.
+deployment's base image by digest, and rig up to v0.2.81 hands over a new digest after every
+base build, including one whose steps were all cached: the index it publishes carries a
+provenance attestation that is unique to the build. BuildKit then runs every step here again
+although nothing changed, and the image it publishes has new layers each time. Rig v0.2.82
+keeps the digest of an unchanged base, which removes that; the cache mounts above cover the
+rebuilds that remain legitimate.
 
 Measured with `rig build --arch amd64` on a deployment of zenoh-router, ros2-bag-logger and one
 ouster instance (base image, messages overlay, this image), Docker Engine 29.9.2 with BuildKit
@@ -138,13 +138,14 @@ ouster instance (base image, messages overlay, this image), Docker Engine 29.9.2
 and a local registry. Times are for this image's build step. They are single measurements; the
 apt download of the same 1.09 GB varied between 43 and 122 seconds.
 
-| What changed since the previous build | rig v0.2.81, previous Dockerfile | Unchanged base digest kept, this Dockerfile |
+| What changed since the previous build | rig v0.2.81, previous Dockerfile | rig v0.2.82, this Dockerfile |
 |---|---:|---:|
 | Nothing | 6m32s | 1s |
 | A supervisor file under `docker/entrypoints/` | every step again, as above | 1s |
 | A comment in `ouster.repos` | every step again, as above | 1s |
 | The base image's content | 6m32s | 2m27s |
 
+The second column was measured with the rig change that v0.2.82 released, before it was tagged.
 The first column is one measurement: with rig v0.2.81 the build saw a new base digest and ran
 every step again, with the compiler cache warm (8.8 s of compilation) and 1.25 GB of packages
 downloaded again. The same work is what a real base change costs with the previous Dockerfile.
@@ -153,7 +154,7 @@ unpacking the build dependencies (104 s) and installing the runtime dependencies
 The first build on an empty builder took 6m27s before these changes (205 s for the build
 dependencies, 143 s to compile) and 6m48s with them: nothing here makes a cold build faster.
 
-Clean builds, measured the same way with the rig that keeps an unchanged digest:
+Clean builds, measured the same way with that rig change:
 
 | Build | Time for this image |
 |---|---:|
