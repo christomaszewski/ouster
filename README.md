@@ -304,6 +304,10 @@ validate on the OS1-64/FW 2.4: boot with persisted standby, activate, repeat sta
 restart the container while parked, and power-cycle the sensor while parked. Check both reported
 state and sensor status; mock tests do not replace this hardware check.
 
+The stream sampling test (`tests/test_health_stream_ros.py`) runs in the image under its
+default RMW and again under `rmw_zenoh_cpp`, the RMW deployments use, through a router it starts
+on a loopback port of its own.
+
 The runtime integration test uses real ROS lifecycle services when ROS is installed and verifies
 deactivate/cleanup after SIGTERM without any lifecycle CLI calls. An isolated Orin/Zenoh benchmark
 with a simulated lifecycle node measured driver stop at 3.50 seconds with CLI calls versus 0.11
