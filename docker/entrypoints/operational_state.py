@@ -29,6 +29,11 @@ SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
 TARGET_FILE = os.environ.get("OUSTER_TARGET_FILE", "/var/lib/ouster/target-state")
 PARAMS_FILE = os.environ.get("OUSTER_PARAMS_FILE", "/etc/ouster_driver/params.yaml")
 
+# An active driver is stopped only after this many further observations, this many seconds apart,
+# have also gone unanswered. Not yet confirmed on hardware: see Controller.confirmed.
+PROBE_RETRIES = 2
+PROBE_RETRY_PAUSE = 2
+
 
 class Driver:
     def __init__(self, params_file, namespace):
@@ -185,19 +190,58 @@ class Controller:
         if self.stop_event.wait(seconds):
             raise RuntimeError("supervisor stopping")
 
-    def observe(self):
+    def survey(self):
+        """Read both layers once. Returns the observation, and whether the only thing between it
+        and an active target is a lifecycle request that got no reply: the sensor answered and
+        is running, so nothing that did answer contradicts the target."""
         info, config = self.sensor.snapshot()
         lifecycle = self.driver.lifecycle()
         mode, status = config["operating_mode"], info.get("status", "unknown")
+        running = mode == "NORMAL" and status == "RUNNING"
         state = "transitioning"
         if self.target == "standby" and self.driver.process is None and mode == "STANDBY" and status == "STANDBY":
             state = "standby"
-        elif self.target == "active" and lifecycle == "active" and mode == "NORMAL" and status == "RUNNING":
+        elif self.target == "active" and lifecycle == "active" and running:
             state = "active"
         detail = f"target:{self.target}; lifecycle:{lifecycle}; sensor:{mode}/{status}"
         self.sensor_info = info
         self.observation = {"state": state, "detail": detail, "at": self.clock()}
-        return {"state": state, "detail": detail}
+        unanswered = self.target == "active" and running and lifecycle == "unreachable"
+        return {"state": state, "detail": detail}, unanswered
+
+    def observe(self):
+        return self.survey()[0]
+
+    def confirmed(self):
+        """Whether the target state is in effect, asking again while a probe goes unanswered.
+
+        An observation is two sensor HTTP requests and one lifecycle request, repeated every five
+        seconds. One of them timing out says nothing about a sensor that is delivering data, yet
+        acting on it stops the driver, asserts the sensor mode and starts the driver again: tens
+        of seconds without lidar data. So while the target is active and the driver process is
+        alive, an unanswered observation is repeated before anything is stopped.
+
+        Everything else is acted on at once, as before: a driver process that exited, a sensor
+        that answers with another mode or status, a lifecycle state other than active, an error
+        the sensor will repeat. Upstream's own recovery has to be stopped before this
+        supervisor's starts. The window is short for the same reason, and nothing is written to
+        the sensor while it is open."""
+        for attempt in range(PROBE_RETRIES + 1):
+            try:
+                result, unanswered = self.survey()
+                if result["state"] == self.target:
+                    if attempt:
+                        LOG.info("observation answered; driver left running")
+                    return True
+                reason = result["detail"]
+            except Exception as error:
+                unanswered, reason = SensorHTTP.transient(error), str(error)
+            retry = unanswered and self.target == "active" and self.driver.running()
+            if not retry or attempt == PROBE_RETRIES:
+                return False
+            LOG.warning("observation unanswered (%s); asking again before stopping the driver (%d of %d)",
+                        reason, attempt + 1, PROBE_RETRIES)
+            self.pause(PROBE_RETRY_PAUSE)
 
     def state(self):
         if self.changing.is_set():
@@ -215,11 +259,9 @@ class Controller:
     def reconcile(self):
         if self.stop_event.is_set():
             raise RuntimeError("supervisor stopping")
-        try:
-            if self.observe()["state"] == self.target:
-                return
-        except Exception:
-            pass  # stop upstream recovery before attempting sensor recovery
+        if self.confirmed():
+            return
+        # Stop upstream recovery before attempting sensor recovery.
         self.changing.set()
         self.driver.stop()
         if self.stop_event.is_set():

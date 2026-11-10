@@ -204,6 +204,13 @@ A running container has two operational states, managed through the launcher:
   the command fails with an explicit retry message. A failed accepted request retains its
   target; the supervisor retries recovery every five seconds. The healthcheck and `state`
   are read-only. Sensor mode writes never intentionally persist config to flash.
+- Each five-second observation is two sensor HTTP requests and one lifecycle request. While the
+  target is `active` and the driver process is alive, an observation that gets no answer (one
+  of those requests timing out or failing in transit) is repeated twice, two seconds apart,
+  before the driver is stopped, so one lost reply does not cost a driver restart. An answer
+  that contradicts the target, or a driver process that exited, starts recovery at once.
+  Nothing is written to the sensor while the supervisor is asking again. The repeat count and
+  spacing (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) have not been confirmed on hardware.
 
 Firmware below 3.1 (including 2.4) uses the legacy config commands followed by `reinitialize`;
 newer firmware uses explicit nonpersistent staging. Temporary HTTP failures during spin-up

@@ -204,12 +204,16 @@ class FakeDriver:
         self.events = events
         self.process = None
         self.lc = "unreachable"
+        self.lost_replies = 0
         self.stop_fails = False
 
     def running(self):
         return self.process is not None
 
     def lifecycle(self):
+        if self.running() and self.lost_replies:
+            self.lost_replies -= 1
+            return "unreachable"
         return self.lc if self.running() else "absent"
 
     def stop(self):
@@ -230,10 +234,15 @@ class FakeSensor:
         self.mode = "STANDBY"
         self.status = "STANDBY"
         self.fail = False
+        self.lost_replies = 0
+        self.lost_reply = TimeoutError("timed out")
 
     def snapshot(self):
         if self.fail:
             raise OSError("sensor disconnected")
+        if self.lost_replies:
+            self.lost_replies -= 1
+            raise self.lost_reply
         return {"status": self.status}, {"operating_mode": self.mode}
 
     def ensure_mode(self, mode, **_):
@@ -358,6 +367,101 @@ class ControllerTests(unittest.TestCase):
         self.events.clear()
         self.controller.transition("active")
         self.assertEqual(self.events, [])
+
+    def active_and_watched(self):
+        """An active instance whose repeat pauses are recorded instead of slept."""
+        self.controller.transition("active")
+        self.events.clear()
+        self.pauses = []
+        self.controller.pause = self.pauses.append
+
+    def test_one_unanswered_sensor_request_leaves_an_active_driver_running(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.sensor.lost_replies = 1
+        with patch.object(operational, "PROBE_RETRY_PAUSE", 0.01), \
+                self.assertLogs("ouster-state", "WARNING") as logs:
+            self.controller.transition()  # the five-second loop's call
+        self.assertEqual(self.events, [])
+        self.assertIn("timed out", logs.output[0])
+        self.assertFalse(self.controller.changing.is_set())
+        self.assertEqual(self.controller.error, "")
+        self.assertEqual(self.controller.state()["state"], "active")
+
+    def test_one_unanswered_lifecycle_request_leaves_an_active_driver_running(self):
+        self.active_and_watched()
+        self.driver.lost_replies = 1
+        with self.assertLogs("ouster-state", "WARNING") as logs:
+            self.controller.transition()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.pauses, [operational.PROBE_RETRY_PAUSE])
+        self.assertIn("lifecycle:unreachable", logs.output[0])
+
+    def test_repeated_activate_request_tolerates_an_unanswered_observation(self):
+        self.active_and_watched()
+        self.sensor.lost_replies = operational.PROBE_RETRIES
+        with self.assertLogs("ouster-state", "WARNING"):
+            self.controller.transition("active")
+        self.assertEqual(self.events, [])
+
+    def test_driver_is_restarted_when_every_repeat_goes_unanswered(self):
+        for layer in ("sensor", "driver"):
+            with self.subTest(layer=layer):
+                self.active_and_watched()
+                getattr(self, layer).lost_replies = operational.PROBE_RETRIES + 1
+                with self.assertLogs("ouster-state", "WARNING") as logs:
+                    self.controller.transition()
+                self.assertEqual(self.events, ["driver:stop", "sensor:NORMAL", "driver:start"])
+                self.assertEqual(self.pauses, [operational.PROBE_RETRY_PAUSE] * operational.PROBE_RETRIES)
+                self.assertEqual(len(logs.output), operational.PROBE_RETRIES)
+                self.assertEqual(self.controller.state()["state"], "active")
+
+    def test_answers_that_contradict_an_active_target_are_acted_on_at_once(self):
+        def parked():
+            self.sensor.mode, self.sensor.status = "STANDBY", "STANDBY"
+
+        def initializing():
+            self.sensor.status = "INITIALIZING"
+
+        def inactive():
+            self.driver.lc = "inactive"
+
+        def exited():
+            self.driver.process = None
+            self.sensor.lost_replies = 1
+
+        def rejected():
+            self.sensor.lost_replies = 1
+            self.sensor.lost_reply = SensorError("sensor active config has no valid operating_mode")
+
+        for fault in (parked, initializing, inactive, exited, rejected):
+            with self.subTest(fault=fault.__name__):
+                self.active_and_watched()
+                fault()
+                self.controller.transition()
+                self.assertEqual(self.pauses, [])
+                self.assertEqual(self.events[0], "driver:stop")
+                self.sensor.lost_reply = TimeoutError("timed out")
+
+    def test_standby_target_never_waits_for_a_repeat(self):
+        self.driver.process = object()
+        self.pauses = []
+        self.controller.pause = self.pauses.append
+        self.sensor.lost_replies = 1
+        self.controller.transition()
+        self.assertEqual(self.pauses, [])
+        self.assertEqual(self.events, ["driver:stop", "sensor:STANDBY"])
+
+    def test_shutdown_during_the_repeat_window_leaves_the_driver_to_shutdown(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.sensor.lost_replies = 1
+        self.controller.stop_event.wait = lambda seconds: True  # SIGTERM arrives while pausing
+        with self.assertLogs("ouster-state", "WARNING"), \
+                self.assertRaisesRegex(RuntimeError, "supervisor stopping"):
+            self.controller.transition()
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.controller.changing.is_set())
 
     def test_shutdown_parks_after_stopping_and_preserves_restart_target(self):
         self.controller.transition("active")
