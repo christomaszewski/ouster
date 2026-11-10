@@ -200,10 +200,22 @@ A running container has two operational states, managed through the launcher:
 - **`state`** prints machine JSON on stdout (`active` | `standby` | `transitioning` | `down`).
   Its detail includes the target, lifecycle state, and sensor mode/status. A mismatch or
   unreachable sensor is `transitioning` and unhealthy, including after a partial failure.
+  It exits 0 with one JSON object whatever the project is doing. When a container is running
+  but its supervisor does not answer (starting, stopping or hung), the launcher answers
+  `{"state": "transitioning", "detail": "supervisor unreachable"}`; read it next to the
+  container health, which asks the same socket. A listed container that is not running, for
+  example one in a restart loop, is `down` with `container <status>` as its detail.
 - Requests are serialized and idempotent. If another transition remains busy for 20 seconds,
   the command fails with an explicit retry message. A failed accepted request retains its
   target; the supervisor retries recovery every five seconds. The healthcheck and `state`
   are read-only. Sensor mode writes never intentionally persist config to flash.
+- `standby` and `activate` wait up to 372 seconds for the supervisor's reply. That is 30
+  seconds more than the slowest request the supervisor still answers, an activation that uses
+  every budget and then fails: 20 waiting for a transition in progress, 37 observing, 31
+  stopping the old driver, 120 for the sensor to reach NORMAL, 103 for the driver to become
+  active, and 31 stopping it again. A success that uses every budget answers after about 308
+  seconds; with the previous 300-second wait the client could report it as a timeout. The
+  numbers are named constants in `operational_state.py`, and the wait is derived from them.
 - Each five-second observation is two sensor HTTP requests and one lifecycle request. While the
   target is `active` and the driver process is alive, an observation that gets no answer (one
   of those requests timing out or failing in transit) is repeated twice, two seconds apart,
@@ -223,6 +235,9 @@ for a new container. Standby startup does not launch the driver or briefly wake 
 Both foreground `up` and `up -d` support standby. Detached `up -d` additionally waits for the
 requested state, including when reusing an existing container. Its default budget is 300 seconds
 (`OUSTER_SETTLE_TIMEOUT`; the older `OUSTER_STANDBY_SETTLE_TIMEOUT` also remains accepted).
+The budget is judged against a fresh state probe: a transition request that is still running
+when it ends is allowed to finish, and counts as a success if the instance then reports the
+requested state.
 
 Runtime requests are saved in `/var/lib/ouster/target-state` inside the container, so a Docker
 restart retains the latest request. Recreating the container uses the configured initial state.

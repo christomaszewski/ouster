@@ -561,6 +561,84 @@ class ControllerTests(unittest.TestCase):
                 worker.join()
 
 
+class BudgetTests(unittest.TestCase):
+    """The client has to outwait the slowest request the supervisor still answers."""
+
+    def replay(self, target, *, active_after=None):
+        """Seconds a request takes when every step uses its whole budget. The lifecycle request
+        goes unanswered until `active_after` seconds after the driver was started (None: always)."""
+        clock = FakeClock()
+
+        class SlowSensor(FakeSensor):
+            def snapshot(self):
+                clock.sleep(2 * operational.SNAPSHOT_TIMEOUT)
+                return super().snapshot()
+
+            def ensure_mode(self, mode, **kwargs):
+                clock.sleep(operational.MODE_WAIT[mode])
+                super().ensure_mode(mode, **kwargs)
+
+        class SlowDriver(FakeDriver):
+            active_at = None
+
+            def lifecycle(self):
+                if not self.running():
+                    return "absent"
+                clock.sleep(operational.LIFECYCLE_TIMEOUT)
+                return "active" if self.active_at is not None and clock.now >= self.active_at else "unreachable"
+
+            def stop(self):
+                clock.sleep(operational.STOP_BUDGET)
+                super().stop()
+
+            def start(self):
+                super().start()
+                self.active_at = None if active_after is None else clock.now + active_after
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        sensor, driver = SlowSensor([]), SlowDriver([])
+        sensor.mode, sensor.status = "NORMAL", "RUNNING"
+        driver.process = object()  # a live driver that does not answer
+        controller = operational.Controller(sensor, driver, "active", Path(temp.name) / "target", clock=clock)
+        controller.pause = clock.sleep
+        try:
+            with self.assertLogs("ouster-state"):
+                controller.transition(target)
+            elapsed = clock.now
+            self.assertEqual(controller.state()["state"], target)
+        except RuntimeError as error:
+            elapsed = clock.now
+            self.assertIn("did not become active", str(error))
+            self.assertIsNone(active_after)
+        return operational.LOCK_WAIT + elapsed
+
+    def test_slowest_answers_fit_the_budget_the_client_outwaits(self):
+        failed = self.replay("active")
+        succeeded = self.replay("active", active_after=operational.ACTIVATION_WAIT - 1)
+        parked = self.replay("standby")
+        in_flight = operational.OBSERVE_BUDGET + operational.ACTIVATION_POLL
+        self.assertGreater(failed, succeeded)
+        self.assertGreater(succeeded, parked)
+        # The replay's observations fall where they fall; the budget also covers one that starts
+        # just before the activation deadline.
+        self.assertLessEqual(failed, operational.TRANSITION_BUDGET)
+        self.assertGreater(failed + in_flight, operational.TRANSITION_BUDGET)
+        self.assertGreater(succeeded, 300, "the previous client wait would have reported this success as a timeout")
+        self.assertGreaterEqual(operational.COMMAND_TIMEOUT, operational.TRANSITION_BUDGET + 30)
+
+    def test_client_waits_for_the_command_timeout(self):
+        from unittest.mock import MagicMock
+        for command, expected in (("activate", operational.COMMAND_TIMEOUT),
+                                  ("standby", operational.COMMAND_TIMEOUT), ("state", 15)):
+            with self.subTest(command=command), patch.object(operational.socket, "socket", MagicMock()) as factory:
+                connection = factory.return_value.__enter__.return_value
+                connection.makefile.return_value.__enter__.return_value.readline.return_value = \
+                    b'{"ok": true, "state": "active"}\n'
+                operational.client(command, output=False)
+                connection.settimeout.assert_called_once_with(expected)
+
+
 class IdentityTests(unittest.TestCase):
     """Which reinitializations the supervisor caused: real mode changes against the firmware model."""
 

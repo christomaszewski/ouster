@@ -9,6 +9,10 @@ import urllib.parse
 import urllib.request
 
 
+SNAPSHOT_TIMEOUT = 3  # seconds for each of the two requests of a status/config read
+MODE_WAIT = {"NORMAL": 120, "STANDBY": 60}  # seconds for the sensor to reach a mode
+
+
 class SensorError(RuntimeError):
     pass
 
@@ -49,7 +53,7 @@ class SensorHTTP:
             raise SensorError(f"unrecognized sensor firmware: {info.get('build_rev')!r}")
         return tuple(map(int, match.groups()))
 
-    def snapshot(self, timeout=3):
+    def snapshot(self, timeout=SNAPSHOT_TIMEOUT):
         info = json.loads(self.request("/metadata/sensor_info", timeout=timeout))
         if self.on_info is not None:
             self.on_info(info)
@@ -99,7 +103,7 @@ class SensorHTTP:
         while self.clock() < deadline:
             self.check_cancelled(stop_event)
             try:
-                return self.snapshot(timeout=max(0.1, min(3, (deadline - self.clock()) / 2)))
+                return self.snapshot(timeout=max(0.1, min(SNAPSHOT_TIMEOUT, (deadline - self.clock()) / 2)))
             except Exception as error:
                 if not self.transient(error):
                     raise
@@ -108,8 +112,7 @@ class SensorHTTP:
 
     def ensure_mode(self, target, *, timeout=None, stop_event=None):
         expected = {"NORMAL": "RUNNING", "STANDBY": "STANDBY"}[target]
-        deadline = self.clock() + (timeout if timeout is not None else
-                                   (120 if target == "NORMAL" else 60))
+        deadline = self.clock() + (timeout if timeout is not None else MODE_WAIT[target])
 
         def write(path, body=None):
             self.check_cancelled(stop_event)

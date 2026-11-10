@@ -8,6 +8,8 @@ outside the executor thread; it must keep spinning until driver.stop finishes.
 import threading
 import time
 
+REQUEST_TIMEOUT = 5  # seconds for one lifecycle request, service discovery included
+
 
 class LifecycleClient:
     def __init__(self, node, driver_node):
@@ -41,10 +43,10 @@ class LifecycleClient:
             # A late response must not accumulate futures after failed probes.
             client.remove_pending_request(future)
 
-    def state(self, timeout=5):
+    def state(self, timeout=REQUEST_TIMEOUT):
         return self.call(self.get_state, self.get_request(), timeout).current_state.label
 
-    def transition(self, name, timeout=5):
+    def transition(self, name, timeout=REQUEST_TIMEOUT):
         request = self.change_request()
         request.transition.id = self.transitions[name]
         if not self.call(self.change_state, request, timeout).success:

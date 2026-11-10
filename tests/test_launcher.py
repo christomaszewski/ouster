@@ -28,6 +28,7 @@ echo "shutdown=${OUSTER_SHUTDOWN_STATE:-unset}" >> "$ARGV_LOG"
 echo "health=${OUSTER_HEALTH_CONFIG:-unset}" >> "$ARGV_LOG"
 case "$*" in
   "compose version") exit 0 ;;
+  "inspect --format {{.State.Status}}"*) echo "${CONTAINER_STATUS:-running}" ;;
   "inspect --format"*) echo "${STOP_EXIT_CODE:-0}" ;;
   "logs --tail 40"*) echo 'shutdown log evidence' ;;
   *" stop "*driver) [ "${STOP_FAILS:-}" = 1 ] && exit 9 ;;
@@ -36,7 +37,10 @@ case "$*" in
     [ "${UNREACHABLE:-}" = 1 ] && exit 1
     value="$(cat "$FAKE_STATE")"
     printf '{"state": "%s", "detail": "%s"}\\n' "$value" "${FAKE_DETAIL:-fake}" ;;
-  *" exec -T driver /usr/local/bin/statectl.sh activate") echo active > "$FAKE_STATE" ;;
+  *" exec -T driver /usr/local/bin/statectl.sh activate")
+    [ "${UNREACHABLE:-}" = 1 ] && exit 1
+    sleep "${ACTIVATE_SECONDS:-0}"
+    echo active > "$FAKE_STATE" ;;
   *" exec -T driver /usr/local/bin/statectl.sh standby") echo standby > "$FAKE_STATE" ;;
 esac
 exit 0
@@ -64,6 +68,31 @@ exit 0
         self.assertEqual(json.loads(result.stdout)["state"], "down")
         self.assertFalse((self.root / "var").exists())
         self.assertNotIn("volume create", self.log.read_text())
+
+    def test_state_forwards_the_supervisors_answer(self):
+        result = self.run_launcher("state", RUNNING="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"state": "standby", "detail": "fake"})
+
+    def test_state_answers_while_the_supervisor_is_unreachable(self):
+        """A listed container whose supervisor does not answer: still exit 0 and one JSON object
+        from the contract's vocabulary, never an empty stdout (rig then shows "unknown")."""
+        for status, expected in (("running", {"state": "transitioning", "detail": "supervisor unreachable"}),
+                                 ("restarting", {"state": "down", "detail": "container restarting"}),
+                                 ("exited", {"state": "down", "detail": "container exited"}),
+                                 ('"; bad', {"state": "down", "detail": "container not running"})):
+            with self.subTest(status=status):
+                result = self.run_launcher("state", RUNNING="1", UNREACHABLE="1", CONTAINER_STATUS=status)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), expected)
+                self.assertEqual(len(result.stdout.splitlines()), 1)
+                self.assertIn("did not answer", result.stderr)
+        self.assertFalse((self.root / "var").exists())
+
+    def test_transition_through_an_unreachable_supervisor_still_fails(self):
+        result = self.run_launcher("activate", RUNNING="1", UNREACHABLE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
 
     def test_transitions_do_not_create_containers(self):
         for verb in ("standby", "activate"):
@@ -93,6 +122,11 @@ exit 0
         self.assertEqual(self.state.read_text().strip(), "active")
         self.assertIn("active docker compose", self.log.read_text())
         self.assertIn("statectl.sh activate", self.log.read_text())
+
+    def test_transition_that_outlasts_the_settle_budget_and_succeeds_is_a_success(self):
+        result = self.run_launcher("up", "-d", ACTIVATE_SECONDS="2", OUSTER_SETTLE_TIMEOUT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state.read_text().strip(), "active")
 
     def test_unreachable_startup_times_out(self):
         result = self.run_launcher("up", "-d", UNREACHABLE="1")

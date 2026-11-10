@@ -21,8 +21,9 @@ import time
 
 import yaml
 
-from sensor_http import SensorHTTP
+from sensor_http import MODE_WAIT, SNAPSHOT_TIMEOUT, SensorHTTP
 from health_ros import health_monitor
+from lifecycle_ros import REQUEST_TIMEOUT as LIFECYCLE_TIMEOUT
 
 LOG = logging.getLogger("ouster-state")
 SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
@@ -33,6 +34,26 @@ PARAMS_FILE = os.environ.get("OUSTER_PARAMS_FILE", "/etc/ouster_driver/params.ya
 # have also gone unanswered. Not yet confirmed on hardware: see Controller.confirmed.
 PROBE_RETRIES = 2
 PROBE_RETRY_PAUSE = 2
+
+# Failure budgets in seconds: ceilings, not delays.
+LOCK_WAIT = 20        # a request waits this long behind an observation or transition in progress
+ACTIVATION_WAIT = 90  # a started driver has this long to report active
+ACTIVATION_POLL = 2
+STOP_SIGNALS = ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 4))
+OBSERVE_BUDGET = 2 * SNAPSHOT_TIMEOUT + LIFECYCLE_TIMEOUT  # both sensor requests, then the lifecycle one
+STOP_BUDGET = 3 * LIFECYCLE_TIMEOUT + sum(budget for _, budget in STOP_SIGNALS)  # state, deactivate, cleanup; signals
+# The slowest standby/activate request the supervisor still answers is an activate. In order: the
+# lock, the first observation and its repeats, stopping the old driver, waking the sensor, driver
+# activation with an observation and a pause in flight when its deadline passes, and stopping the
+# driver again because it did not become active. (A success confirms with one observation
+# instead; standby parks in MODE_WAIT["STANDBY"] and starts nothing.)
+TRANSITION_BUDGET = (LOCK_WAIT + OBSERVE_BUDGET + PROBE_RETRIES * (PROBE_RETRY_PAUSE + OBSERVE_BUDGET)
+                     + STOP_BUDGET + MODE_WAIT["NORMAL"]
+                     + ACTIVATION_WAIT + OBSERVE_BUDGET + ACTIVATION_POLL + STOP_BUDGET)
+# The client waits longer than that. With the same wait on both sides, a slow activation that
+# succeeded could be reported as a timeout. tests/test_operational_state.py replays the slowest
+# paths against these numbers.
+COMMAND_TIMEOUT = TRANSITION_BUDGET + 30
 
 
 class Driver:
@@ -58,7 +79,7 @@ class Driver:
         try:
             result = subprocess.run(
                 ["ros2", "lifecycle", "get", self.node], capture_output=True,
-                text=True, timeout=5, check=True,
+                text=True, timeout=LIFECYCLE_TIMEOUT, check=True,
             )
             # Zenoh can emit ANSI-colored watchdog warnings on stdout before or after
             # the CLI response. Only accept the lifecycle response's complete line.
@@ -94,7 +115,7 @@ class Driver:
                     else:
                         subprocess.run(
                             ["ros2", "lifecycle", "set", self.node, transition],
-                            capture_output=True, text=True, timeout=5, check=True,
+                            capture_output=True, text=True, timeout=LIFECYCLE_TIMEOUT, check=True,
                         )
                 LOG.info("driver lifecycle drain (%s) finished in %.2fs", state,
                          time.monotonic() - started)
@@ -103,7 +124,7 @@ class Driver:
         # Kill/wait for the entire launch process group, even if its leader has
         # already exited. No upstream config writer may survive into standby.
         pgid = self.process.pid
-        for sig, budget in ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 4)):
+        for sig, budget in STOP_SIGNALS:
             if sig != signal.SIGINT:
                 LOG.warning("driver process group still running; sending %s", sig.name)
             try:
@@ -302,7 +323,7 @@ class Controller:
                 raise RuntimeError("supervisor stopping")
             self.expect_reinit()  # the driver reinitializes the sensor if its config differs
             self.driver.start()
-            deadline = self.clock() + 90
+            deadline = self.clock() + ACTIVATION_WAIT
             try:
                 while self.clock() < deadline:
                     if not self.driver.running():
@@ -312,9 +333,9 @@ class Controller:
                             break
                     except Exception:
                         pass  # sensor may reinitialize when driver config is applied
-                    self.pause(2)
+                    self.pause(ACTIVATION_POLL)
                 else:
-                    raise RuntimeError("driver did not become active within 90 seconds")
+                    raise RuntimeError(f"driver did not become active within {ACTIVATION_WAIT} seconds")
             except Exception:
                 self.driver.stop()
                 raise
@@ -330,7 +351,7 @@ class Controller:
             raise ValueError("target must be active or standby")
         # Allow a brief status probe to finish, but do not queue a command
         # indefinitely behind another transition.
-        if not self.lock.acquire(timeout=20 if target is not None else 0):
+        if not self.lock.acquire(timeout=LOCK_WAIT if target is not None else 0):
             raise RuntimeError("transition in progress; retry when state settles")
         try:
             if self.stop_event.is_set():
@@ -476,7 +497,7 @@ def serve(*, monitor=health_monitor):
 
 def client(command, *, output=True):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(300 if command in ("standby", "activate") else 15)
+        connection.settimeout(COMMAND_TIMEOUT if command in ("standby", "activate") else 15)
         connection.connect(SOCKET)
         connection.sendall((json.dumps({"command": command}) + "\n").encode())
         with connection.makefile("rb") as stream:
