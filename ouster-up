@@ -155,7 +155,10 @@ if [ "${ARGS[0]}" = down ]; then
   done
   DOWN_EXIT_STATUS=0
   if [ -n "$CONTAINERS" ]; then
-    docker compose "${FILES[@]}" "${STOP_ARGS[@]}" driver
+    if ! docker compose "${FILES[@]}" "${STOP_ARGS[@]}" driver; then
+      echo "ouster-up: stopping the driver container failed; sensor state unconfirmed" >&2
+      DOWN_EXIT_STATUS=1
+    fi
     for container in $CONTAINERS; do
       EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$container")" || EXIT_CODE=unknown
       if [ "$EXIT_CODE" != 0 ]; then

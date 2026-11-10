@@ -10,7 +10,10 @@
 # Uses the dev image (toolchain + rviz2 + rosbag2). First vendor upstream on the host
 # (`python3 tools/fetch_upstream.py src` — see README
 # quick start) so the bind-mounted src/ is populated; the first run resolves deps + builds
-# the vendored workspace.
+# the vendored workspace. The build uses the same flags as the dev instructions (README quick
+# start, compose.dev.yaml): the Lyrical ament_target_dependencies shim, without which upstream
+# does not configure on Lyrical, and --merge-install, so a workspace already built in the dev
+# container is reused instead of refused for its install layout.
 name: ouster_replay
 services:
   replay:
@@ -34,7 +37,9 @@ services:
       - -lc
       - >
         rosdep install --from-paths src --ignore-src -y &&
-        colcon build --base-paths src --cmake-args -DCMAKE_BUILD_TYPE=Release &&
+        colcon build --base-paths src --merge-install --cmake-args
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-Wno-deprecated-declarations
+        -DCMAKE_PROJECT_ouster_ros_INCLUDE=/workspace/docker/ament_target_dependencies_compat.cmake &&
         source install/setup.bash &&
         ros2 launch ouster_ros replay.launch.xml
         bag_file:=/data/${OUSTER_REPLAY_BAG:?export OUSTER_REPLAY_BAG=<bag under OUSTER_DATA_DIR>}

@@ -167,7 +167,9 @@ def main() -> int:
     ttype = str(connection.get("type") or "lidar")
     namespace = require_ident("ros.namespace", str((cfg.get("ros") or {}).get("namespace") or name))
     zenoh_pairs, zenoh_warns = derive_zenoh(cfg.get("zenoh") or {})
-    health = cfg.get("health", {})
+    health = cfg.get("health")
+    if health is None:  # absent, or a bare `health:` whose entries are all commented out
+        health = {}
     if not isinstance(health, dict):
         sys.stderr.write("render_params: health must be a mapping\n")
         return 2
@@ -234,6 +236,14 @@ def main() -> int:
     if merged.get("operating_mode") not in (None, "", "NORMAL"):
         sys.stderr.write("render_params: omit driver_params.operating_mode or use NORMAL; "
                          "select standby with initial_state instead\n")
+        return 2
+    # The supervisor refuses to start without the sensor's address (its HTTP mode control and
+    # health polling need it as much as the driver does). Unchecked here, the container would
+    # only restart in a loop while a detached `up` waits out its whole settle timeout.
+    hostname = merged.get("sensor_hostname")
+    if hostname is None or not str(hostname).strip():
+        sys.stderr.write("render_params: connection.lidar.sensor_hostname is required "
+                         "(the sensor's hostname or IP address)\n")
         return 2
     doc = {"/**": {"ros__parameters": merged}}
     yaml.safe_dump(doc, sys.stdout, default_flow_style=False, sort_keys=False)

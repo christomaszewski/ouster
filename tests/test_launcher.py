@@ -30,6 +30,7 @@ case "$*" in
   "compose version") exit 0 ;;
   "inspect --format"*) echo "${STOP_EXIT_CODE:-0}" ;;
   "logs --tail 40"*) echo 'shutdown log evidence' ;;
+  *" stop "*driver) [ "${STOP_FAILS:-}" = 1 ] && exit 9 ;;
   *" ps -q driver"|*" ps -aq driver") [ "${RUNNING:-}" = 1 ] && echo container; exit 0 ;;
   *" exec -T driver /usr/local/bin/statectl.sh state")
     [ "${UNREACHABLE:-}" = 1 ] && exit 1
@@ -151,6 +152,33 @@ exit 0
         self.assertIn("health.poll_interval_s", result.stderr)
         self.assertNotIn(" up", self.log.read_text())
 
+    def test_bare_health_key_means_defaults(self):
+        self.config.write_text(self.config.read_text() + "\nhealth:\n  # interval_s: 1\n")
+        result = self.run_launcher("config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("health={}", self.log.read_text())
+        self.config.write_text(self.config.read_text() + "\nhealth: false\n")
+        result = self.run_launcher("config")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("health must be a mapping", result.stderr)
+
+    def test_missing_sensor_address_never_starts_a_container(self):
+        text = self.config.read_text()
+        self.assertIn("    sensor_hostname: 192.168.1.50", text)
+        self.config.write_text(text.replace("    sensor_hostname: 192.168.1.50", "    # sensor_hostname:"))
+        for args in (("up", "-d"), ("up",), ("config",)):
+            with self.subTest(args=args):
+                result = self.run_launcher(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("sensor_hostname is required", result.stderr)
+        calls = self.log.read_text()
+        self.assertNotIn("volume create", calls)
+        self.assertNotIn(" up", calls)
+        self.assertFalse((self.root / "var").exists())
+        for verb in ("status", "logs", "down", "state"):  # a broken config can still be inspected and removed
+            with self.subTest(verb=verb):
+                self.assertEqual(self.run_launcher(verb).returncode, 0)
+
     def test_inspection_and_teardown_never_render_or_damage_params(self):
         for verb in ("status", "logs", "down"):
             result = self.run_launcher(verb)
@@ -187,6 +215,13 @@ exit 0
         self.assertIn("sensor state unconfirmed", result.stderr)
         self.assertIn("shutdown log evidence", result.stderr)
         self.assertIn(" down", self.log.read_text())
+
+    def test_failed_stop_still_tears_down_and_is_reported(self):
+        result = self.run_launcher("down", RUNNING="1", STOP_FAILS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stopping the driver container failed", result.stderr)
+        calls = self.log.read_text()
+        self.assertLess(calls.index(" stop driver"), calls.index(" down"))
 
     def test_down_forwards_user_timeout_to_stop(self):
         result = self.run_launcher("down", "--timeout", "15", RUNNING="1")
