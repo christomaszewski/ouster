@@ -395,6 +395,20 @@ process, which only dropping the subscription would avoid. `packets.received` th
 heartbeats that found a new packet, not packets, and a stopped stream is reported one heartbeat
 later at most.
 
+`alerts.history_gap` turns true when alert history may have been lost, and stays true until the
+supervisor restarts: the sensor's identity changed outside a mode change (a reboot, a power
+cycle, another client reinitializing it, or the running driver resetting the sensor on its own,
+as it does after sustained packet errors and for its `reset` and `set_config` services), the
+alert cursor went backwards, or events were skipped between two polls. The supervisor's own mode
+changes are not such a loss. Each one reinitializes the sensor and changes its
+`initialization_id`, as does the driver when it applies a different config while it is being
+activated; the supervisor knows which reinitializations belong to its transitions and reports
+only the others to the health reporter. After one of its own, a cursor that carried on is
+checked for skipped events as usual and keeps its `alerts.epoch`; a cursor that started again
+from zero gets a new `alerts.epoch` without a gap. Polling pauses during a mode change, so
+alerts the sensor logs inside one are not followed. Not yet confirmed on hardware: that
+`initialization_id` changes on every reinitialization, and whether the alert cursor survives one.
+
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,
 use the deployment's rmw_zenoh router or supported DDS bridge. See the complete

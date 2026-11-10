@@ -34,7 +34,7 @@ class Driver:
     node, lifecycle_client = "/stream_test/os_driver", None
 
 class Controller:
-    sensor, driver, sensor_info = Sensor(), Driver(), {}
+    sensor, driver, sensor_seen = Sensor(), Driver(), ({}, 0)
     def health_state(self):
         return {"state": "active", "detail": "test", "at": time.monotonic(), "target": "active", "error": ""}
 

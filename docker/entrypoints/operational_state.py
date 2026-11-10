@@ -142,8 +142,14 @@ class Controller:
         self.lock = threading.Lock()
         self.changing = threading.Event()
         self.error = ""
-        self.sensor_info = {}
         self.observation = {"state": "unknown", "detail": "waiting for observation", "at": self.clock()}
+        # The sensor's identity as the health reporter needs it: the latest sensor_info, and how
+        # often that identity changed without this supervisor having asked for it (see `see`).
+        self.sensor_seen = ({}, 0)
+        self.sensor_epoch = None
+        self.reinit_expected = False
+        self.identity_lock = threading.Lock()
+        sensor.on_info, sensor.on_reinit = self.see, self.expect_reinit
 
     def health_state(self):
         # Atomic dict replacement; never wait on transition locks or HTTP here.
@@ -190,11 +196,33 @@ class Controller:
         if self.stop_event.wait(seconds):
             raise RuntimeError("supervisor stopping")
 
+    def see(self, info):
+        """Record one sensor_info read. The sensor client reports every read it makes, in order.
+
+        (prod_sn, initialization_id) changes whenever the sensor reinitializes: on a reboot or
+        power cycle, and on every mode change this supervisor makes. The health reporter must
+        tell the two apart, because only the first can lose alert history. A change is counted
+        as a reset unless a reinitialization from here is outstanding: this supervisor's own
+        mode write, or the driver it started applying its config. The pair is replaced as one
+        object, so a reader never sees a new identity with an old count."""
+        epoch = (info.get("prod_sn"), info.get("initialization_id"))
+        with self.identity_lock:
+            resets = self.sensor_seen[1]
+            if self.sensor_epoch not in (None, epoch) and not self.reinit_expected:
+                resets += 1
+            self.sensor_epoch = epoch
+            self.sensor_seen = (info, resets)
+
+    def expect_reinit(self):
+        with self.identity_lock:
+            self.reinit_expected = True
+
     def survey(self):
         """Read both layers once. Returns the observation, and whether the only thing between it
         and an active target is a lifecycle request that got no reply: the sensor answered and
         is running, so nothing that did answer contradicts the target."""
         info, config = self.sensor.snapshot()
+        self.see(info)  # before the slower lifecycle request: identities are recorded in read order
         lifecycle = self.driver.lifecycle()
         mode, status = config["operating_mode"], info.get("status", "unknown")
         running = mode == "NORMAL" and status == "RUNNING"
@@ -204,7 +232,6 @@ class Controller:
         elif self.target == "active" and lifecycle == "active" and running:
             state = "active"
         detail = f"target:{self.target}; lifecycle:{lifecycle}; sensor:{mode}/{status}"
-        self.sensor_info = info
         self.observation = {"state": state, "detail": detail, "at": self.clock()}
         unanswered = self.target == "active" and running and lifecycle == "unreachable"
         return {"state": state, "detail": detail}, unanswered
@@ -260,6 +287,7 @@ class Controller:
         if self.stop_event.is_set():
             raise RuntimeError("supervisor stopping")
         if self.confirmed():
+            self.reinit_expected = False  # whatever was asked of the sensor has been seen
             return
         # Stop upstream recovery before attempting sensor recovery.
         self.changing.set()
@@ -272,6 +300,7 @@ class Controller:
         if self.target == "active":
             if self.stop_event.is_set():
                 raise RuntimeError("supervisor stopping")
+            self.expect_reinit()  # the driver reinitializes the sensor if its config differs
             self.driver.start()
             deadline = self.clock() + 90
             try:
@@ -293,6 +322,7 @@ class Controller:
         result = self.observe()
         if result["state"] != self.target:
             raise RuntimeError(f"transition did not settle: {result['detail']}")
+        self.reinit_expected = False
         LOG.info("%s complete: %s", self.target, result["detail"])
 
     def transition(self, target=None):

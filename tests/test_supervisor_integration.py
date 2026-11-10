@@ -78,6 +78,8 @@ signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 with open(os.environ['FAKE_DRIVER_STARTS'], 'a') as stream:
     stream.write(str(os.getpid()) + '\\n')
 def write_normal():
+    if os.path.exists(os.environ['FAKE_DRIVER_QUIET']):
+        return
     urllib.request.urlopen(os.environ['FAKE_SENSOR'] + '/api/v1/sensor/cmd/set_config_param?args=.+%7B%22operating_mode%22%3A%22NORMAL%22%2C%22udp_port_lidar%22%3A7502%7D', timeout=1).close()
     urllib.request.urlopen(os.environ['FAKE_SENSOR'] + '/api/v1/sensor/cmd/reinitialize', timeout=1).close()
 if importlib.util.find_spec('rclpy'):
@@ -124,6 +126,7 @@ else:
                            OUSTER_NAMESPACE="test_ouster",
                            FAKE_DRIVER_CLI=str(root / "cli"),
                            FAKE_DRIVER_TRANSITIONS=str(root / "transitions"),
+                           FAKE_DRIVER_QUIET=str(root / "quiet"),
                            FAKE_DRIVER_STARTS=str(starts), FAKE_SENSOR=f"http://127.0.0.1:{sensor.server_port}")
                 log = (root / "supervisor.log").open("w+")
                 process = None
@@ -247,11 +250,36 @@ else:
                         wait_temperature(39.0)
                         self.assertEqual(len(starts.read_text().splitlines()), 2)
 
-                        # Simulate power-up from a different persisted mode.
+                        # With a driver that writes nothing itself, the supervisor's own mode
+                        # changes are the only reinitializations. Each gives the sensor a new
+                        # initialization id and is followed by a health poll (the temperature):
+                        # none of them is lost alert history. The driver above reinitialized
+                        # the sensor on its own while active, which is.
+                        def history_gap(expected):
+                            wait_diagnostics(lambda rows: dict((v.key, v.value) for v in rows["sensor alerts"].values)
+                                             .get("alerts.history_gap") == expected)
+
+                        (root / "quiet").touch()
+                        before = firmware.initialization_id
+                        operational.client("activate")
+                        wait_state("active")
+                        wait_temperature(38.5)
+                        operational.client("standby")
+                        wait_state("standby")
+                        wait_temperature(38.0)
+                        (root / "quiet").unlink()
+                        self.assertEqual(firmware.initialization_id, before + 2)
+                        history_gap("false")
+                        self.assertEqual(len(starts.read_text().splitlines()), 3)
+
+                        # Simulate power-up from a different persisted mode: an identity
+                        # change nobody here asked for.
                         with sensor.lock:
                             firmware.active["operating_mode"] = "NORMAL"
+                            firmware.initialization_id += 1
                         wait_state("standby")
-                        self.assertEqual(len(starts.read_text().splitlines()), 2)
+                        self.assertEqual(len(starts.read_text().splitlines()), 3)
+                        history_gap("true")
 
                         # SIGTERM (Docker stop / rig down) must physically park
                         # an active sensor, after killing its reconnect writer.

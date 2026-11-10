@@ -18,6 +18,10 @@ class SensorHTTP:
         self.base = f"http://{hostname}/api/v1/sensor"
         self.clock = clock
         self.sleep = sleep
+        # Set by the supervisor: on_info(info) for every sensor_info read, in order, and
+        # on_reinit() just before this client asks the sensor to reinitialize.
+        self.on_info = None
+        self.on_reinit = None
 
     def request(self, path, body=None, timeout=5):
         request = urllib.request.Request(
@@ -47,6 +51,8 @@ class SensorHTTP:
 
     def snapshot(self, timeout=3):
         info = json.loads(self.request("/metadata/sensor_info", timeout=timeout))
+        if self.on_info is not None:
+            self.on_info(info)
         legacy = self.version(info) < (3, 1, 0)
         path = "/cmd/get_config_param?args=active" if legacy else "/config?staging=false"
         config = json.loads(self.request(path, timeout=timeout))
@@ -128,6 +134,8 @@ class SensorHTTP:
                     raise SensorError(f"sensor rejected staged config: {reply}")
             else:
                 write("/config?staging=true&reinit=false&persist=false", config)
+            if self.on_reinit is not None:
+                self.on_reinit()
             try:
                 if legacy:
                     write("/cmd/reinitialize")

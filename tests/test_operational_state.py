@@ -64,10 +64,22 @@ class Firmware:
         self.initializing_modes = {"NORMAL", "STANDBY"}
         self.telemetry = {"internal_temperature_deg_c": 45}
         self.alerts = {"active": [], "log": [], "next_cursor": 0}
+        self.initialization_id = 7109744  # a new one for every reinitialization, as on the sensor
+        self.unreachable = 0
+
+    def reboot(self):
+        """A power cycle: boot defaults, a new initialization id, an alert log counted from zero."""
+        self.active = dict(self.persisted)
+        self.staged = dict(self.persisted)
+        self.initialization_id += 1
+        self.alerts = {"active": [], "log": [], "next_cursor": 0}
 
     def __call__(self, request, timeout=None):
         path = urllib.parse.urlsplit(request.full_url)
         self.calls.append((request.get_method(), path.path, path.query))
+        if self.unreachable:
+            self.unreachable -= 1
+            raise urllib.error.URLError("no route to host")
         if path.path.endswith("/telemetry"):
             return HTTPResponse(self.telemetry)
         if path.path.endswith("/alerts"):
@@ -77,7 +89,8 @@ class Firmware:
                 self.status_failures -= 1
                 raise urllib.error.HTTPError(request.full_url, 503, "initializing", {}, None)
             status = "RUNNING" if self.active["operating_mode"] == "NORMAL" else "STANDBY"
-            return HTTPResponse({"build_rev": self.version,
+            return HTTPResponse({"build_rev": self.version, "prod_line": "OS-1-64-U02",
+                                 "prod_sn": "992201000123", "initialization_id": self.initialization_id,
                                  "status": "INITIALIZING" if self.never_runs and
                                  self.active["operating_mode"] in self.initializing_modes else status})
         if path.path.endswith("/cmd/get_config_param"):
@@ -93,6 +106,7 @@ class Firmware:
             return HTTPResponse({})
         if path.path.endswith("/cmd/reinitialize") or "reinit=true" in path.query:
             self.active = dict(self.staged)
+            self.initialization_id += 1
             if self.lose_reinit_response:
                 raise urllib.error.URLError("connection reset after applying config")
             return HTTPResponse({})
@@ -545,6 +559,80 @@ class ControllerTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 worker.join()
+
+
+class IdentityTests(unittest.TestCase):
+    """Which reinitializations the supervisor caused: real mode changes against the firmware model."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.firmware = Firmware("v3.1.0")
+        patcher = patch("urllib.request.urlopen", side_effect=self.firmware)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        clock = FakeClock()
+        self.sensor = SensorHTTP("sensor", clock=clock, sleep=clock.sleep)
+        self.driver = FakeDriver([])
+        self.controller = operational.Controller(self.sensor, self.driver, "standby",
+                                                 Path(self.temp.name) / "target", clock=clock)
+        self.controller.stop_event.wait = lambda seconds: clock.sleep(seconds)  # never set
+
+    def resets(self):
+        info, resets = self.controller.sensor_seen
+        self.assertEqual(info["initialization_id"], self.firmware.initialization_id)
+        self.assertFalse(self.controller.reinit_expected)
+        return resets
+
+    def test_own_mode_changes_are_not_resets(self):
+        self.controller.transition()
+        first = self.firmware.initialization_id
+        self.controller.transition("active")
+        self.assertNotEqual(self.firmware.initialization_id, first)
+        self.assertEqual(self.resets(), 0)
+        self.controller.transition("standby")
+        self.controller.transition()
+        self.assertEqual(self.firmware.initialization_id, first + 2)
+        self.assertEqual(self.resets(), 0)
+
+    def test_driver_applying_its_config_is_not_a_reset_but_a_later_change_is(self):
+        start = self.driver.start
+
+        def start_and_configure():
+            start()
+            self.firmware.initialization_id += 1  # upstream set_config reinitializes on a difference
+
+        self.driver.start = start_and_configure
+        self.controller.transition("active")
+        self.assertEqual(self.resets(), 0)
+        self.firmware.initialization_id += 1  # nobody here asked for this one
+        self.controller.transition()
+        self.assertEqual(self.resets(), 1)
+        self.assertEqual(self.driver.events, ["driver:stop", "driver:start"])
+
+    def test_reboot_is_a_reset_although_the_supervisor_parks_the_sensor_again(self):
+        self.controller.transition()
+        self.firmware.persisted["operating_mode"] = "NORMAL"  # boots spinning
+        for unreachable in (0, 2):  # seen by the observation, or first by the recovery's own read
+            with self.subTest(unreachable=unreachable):
+                before = self.resets()
+                self.firmware.reboot()
+                self.firmware.unreachable = unreachable
+                self.controller.transition()
+                self.assertEqual(self.firmware.active["operating_mode"], "STANDBY")
+                self.assertEqual(self.resets(), before + 1)
+
+    def test_failed_mode_change_keeps_its_reinitialization_explained(self):
+        self.controller.transition()
+        self.firmware.never_runs = True
+        self.firmware.initializing_modes = {"NORMAL"}
+        with self.assertRaisesRegex(SensorError, "timed out"):
+            self.controller.transition("active")
+        self.assertTrue(self.controller.reinit_expected)
+        self.firmware.never_runs = False
+        self.controller.transition()
+        self.assertEqual(self.controller.state()["state"], "active")
+        self.assertEqual(self.resets(), 0)
 
 
 class ProcessTests(unittest.TestCase):
