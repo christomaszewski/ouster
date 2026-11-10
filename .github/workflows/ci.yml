@@ -24,8 +24,9 @@ defaults:
 jobs:
   # ---------------------------------------------------------------------------
   # Build the runtime image — the gate that proves the pinned upstream
-  # (ouster.repos) still fetches via `vcs import` and compiles. This is what
-  # catches an upstream version bump that breaks the build. No push: `rig build`
+  # (ouster.repos, ouster-sdk.repos) still fetches through
+  # tools/fetch_upstream.py and compiles. This is what catches an upstream
+  # version bump that breaks the build. No push: `rig build`
   # (tools/build_image.sh) publishes; CI only validates the build.
   # ---------------------------------------------------------------------------
   build-image:
@@ -44,6 +45,14 @@ jobs:
       # the next source pin to reuse objects from the same compiler environment.
       # Register cache before cache-dance: post steps run in reverse order, so
       # extraction finishes before actions/cache saves and Buildx is removed.
+      #
+      # Two restore keys. The first prefers a cache saved for the same build
+      # files. The second takes the newest cache for this architecture and
+      # distro whatever those files were: without it any edit to the Dockerfile,
+      # a comment included, started with an empty compiler cache. That is safe
+      # because ccache answers from the compiler's and the sources' contents
+      # (CCACHE_COMPILERCHECK=content); an entry that no longer applies is
+      # simply never hit.
       - name: Restore compiler cache
         id: compiler-cache
         uses: actions/cache@v4
@@ -52,6 +61,7 @@ jobs:
           key: ouster-ccache-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.ROS_DISTRO }}-${{ hashFiles('docker/Dockerfile.runtime', 'docker/ament_target_dependencies_compat.cmake', 'tools/test_upstream.sh') }}-${{ github.sha }}
           restore-keys: |
             ouster-ccache-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.ROS_DISTRO }}-${{ hashFiles('docker/Dockerfile.runtime', 'docker/ament_target_dependencies_compat.cmake', 'tools/test_upstream.sh') }}-
+            ouster-ccache-v1-${{ runner.os }}-${{ matrix.arch }}-${{ env.ROS_DISTRO }}-
       - name: Restore BuildKit compiler cache mount
         uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
         with:
@@ -66,7 +76,41 @@ jobs:
               }
             }
           skip-extraction: ${{ steps.compiler-cache.outputs.cache-hit }}
-      - uses: docker/build-push-action@v6
+      # When the toolchain layers are not in the layer cache, this build downloads
+      # about 1.1 GB of packages from the Ubuntu archive, and the mirror a runner
+      # is handed can crawl: on 2026-11-10 the amd64 job sat at 100-200 kB/s for 42
+      # minutes, and its re-run built the image in 13m29s. So the first attempt
+      # has a time limit and a second one follows a failure. The retry does not
+      # start over: both attempts use this job's builder, which keeps the layers
+      # already built and the apt and compiler cache mounts, so packages already
+      # downloaded are not fetched again. A build that fails for a real reason
+      # fails twice, the second time from those caches.
+      #
+      # The apt cache mount is not persisted between runs the way ccache is. It
+      # is about 1.2 GB per architecture, and the repository's 10 GB cache limit
+      # already holds the layer cache and several generations of compiler cache;
+      # evicting the layer cache to keep the downloads would cause the very
+      # rebuild they are meant to speed up.
+      - name: Build runtime image
+        id: build
+        continue-on-error: true
+        timeout-minutes: 30
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.runtime
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          load: true
+          tags: ouster_driver:ci
+          cache-from: type=gha,scope=runtime-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=runtime-${{ matrix.arch }}
+          build-args: |
+            ROS_DISTRO=${{ env.ROS_DISTRO }}
+      - name: Build runtime image (retry)
+        if: steps.build.outcome == 'failure'
+        timeout-minutes: 60
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.runtime
