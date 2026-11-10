@@ -21,14 +21,27 @@ def ros_values(values):
 @contextmanager
 def health_monitor(controller, namespace, params, stop_event, changing):
     import rclpy
+    from rclpy.callback_groups import CallbackGroup
     from rclpy.clock import Clock, ClockType
     from rclpy.context import Context
     from rclpy.executors import SingleThreadedExecutor
-    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.qos import QoSProfile, ReliabilityPolicy
     from rclpy.signals import SignalHandlerOptions
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
     from sensor_msgs.msg import Temperature
     from ouster_sensor_msgs.msg import Telemetry
+
+    class Unspun(CallbackGroup):
+        """Entities the executor never waits on; their owner takes from them directly."""
+
+        def can_execute(self, entity):
+            return False
+
+        def beginning_execution(self, entity):
+            return False
+
+        def ending_execution(self, entity):
+            pass
 
     reporter = HealthReporter(os.environ.get("OUSTER_NAME") or namespace.strip("/"),
         os.environ.get("VEHICLE_ID", ""), json.loads(os.environ.get("OUSTER_HEALTH_CONFIG") or "{}"))
@@ -42,8 +55,17 @@ def health_monitor(controller, namespace, params, stop_event, changing):
         temperature = node.create_publisher(Temperature, "temperature", 1)
         receipt_clock = Clock(clock_type=ClockType.SYSTEM_TIME)
         stream_enabled = "TLM" in str(params.get("proc_mask", "IMG|PCL|IMU|SCAN|TLM")).split("|")
+        telemetry = None
         if stream_enabled:
-            node.create_subscription(Telemetry, "telemetry", lambda _: reporter.packet_seen(), qos_profile_sensor_data)
+            # The driver publishes one Telemetry message per lidar packet (640-1280 per second).
+            # A Python callback for each cost 20-30% of a CPU core only to learn that packets
+            # arrive. The stream check needs "did one arrive since the last heartbeat": the
+            # middleware keeps the newest (depth 1), the executor never waits on it, and each
+            # heartbeat takes it. Nothing is deserialized; best effort matches either driver QoS.
+            telemetry = node.create_subscription(
+                Telemetry, "telemetry", lambda _: None,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
+                callback_group=Unspun(), raw=True)
         executor = SingleThreadedExecutor(context=context)
         executor.add_node(node)
         controller.driver.lifecycle_client = LifecycleClient(node, controller.driver.node)
@@ -58,6 +80,13 @@ def health_monitor(controller, namespace, params, stop_event, changing):
                     LOG.exception("health reporting failed; sensor supervisor continues")
                     next_warning = time.monotonic() + 60
 
+        def sample_stream():
+            if telemetry is None:
+                return
+            with telemetry.handle:
+                if telemetry.handle.take_message(telemetry.msg_type, telemetry.raw) is not None:
+                    reporter.packet_seen()
+
         def publish_health():
             if stop_event.is_set():
                 return
@@ -71,7 +100,11 @@ def health_monitor(controller, namespace, params, stop_event, changing):
                 message.status.append(row)
             diagnostics.publish(message)
 
-        node.create_timer(reporter.settings["interval_s"], lambda: guarded(publish_health))
+        def heartbeat():
+            guarded(sample_stream)  # a sampling failure must not silence the diagnostics
+            guarded(publish_health)
+
+        node.create_timer(reporter.settings["interval_s"], heartbeat)
 
         def collect():
             info = controller.sensor_info
