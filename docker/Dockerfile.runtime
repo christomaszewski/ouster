@@ -17,7 +17,8 @@
 # Dependency layers are keyed by upstream package.xml contents, independently of source pins.
 # Cache mounts hold the build stages' apt downloads and the compiler cache, so a step that must
 # run again (a new parent image, a source change) neither downloads nor compiles what it already
-# has. Both belong to the builder: runtime never contains those caches or tests.
+# has. Both belong to the builder, which deletes them for a --no-cache build; runtime never
+# contains those caches or tests.
 ARG ROS_DISTRO=lyrical
 # Shared build/runtime parent. Under rig, tools/build_image.sh forwards RIG_BASE_IMAGE so both stages
 # use the deployment's one shared base (fleet-ros = ros-base + rmw-zenoh +
@@ -133,10 +134,11 @@ ARG TARGETARCH
 ARG BUILD_JOBS
 # A compile that ignores the compiler cache is an explicit request (OUSTER_DISABLE_CCACHE=1 in
 # the environment of tools/build_image.sh, or this build-arg directly), never a side effect of
-# --no-cache. ccache answers from the content of each source, header and compiler binary, so it
-# stays correct after the parent image or the apt layers are refreshed. The value is also part of
-# this stage's cache key: a build made with 1 stores layers that no ordinary build can reuse, so
-# the next ordinary build compiles everything again.
+# --no-cache. BuildKit deletes the cache mounts of a --no-cache build, so that compile starts
+# from an empty compiler cache whatever this is set to; left at 0, it also refills the cache
+# for the builds that follow. The value is part of this stage's cache key as well: a build made
+# with 1 stores its compile where no ordinary build looks, so the next ordinary build compiles
+# again (or, on an unchanged parent image, returns an older compile the builder still holds).
 ARG OUSTER_DISABLE_CCACHE=0
 ENV BUILD_JOBS=${BUILD_JOBS} CCACHE_DIR=/root/.cache/ccache \
     CCACHE_MAXSIZE=1G CCACHE_COMPILERCHECK=content

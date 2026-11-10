@@ -80,9 +80,10 @@ have to run again (a new parent image, a changed manifest, a new source pin):
   downloading them again. The runtime stage is unchanged: it keeps the parent's hook and uses
   no cache mount, so nothing about the shipped image depends on the builder.
 
-Both mounts live in the builder. `docker buildx prune` (or BuildKit's own garbage collection of
-mounts unused for a couple of days) empties them; the next build then downloads and compiles
-once more.
+Both mounts live in the builder and are a performance aid only. A `--no-cache` build,
+`docker buildx prune` and BuildKit's own garbage collection empty them (its first default rule
+removes cache mounts unused for 48 hours once they exceed a size limit, 3.3 GiB on the builder
+measured below); the build that follows downloads and compiles once more.
 
 The Dockerfile has no `# syntax=` line. With one, every build first resolves `docker/dockerfile`
 on Docker Hub, including a build whose steps are all cached; a registry rate limit or a
@@ -90,16 +91,21 @@ disconnected builder then fails it. Its features (heredocs, `RUN --mount`, named
 are in the frontend built into BuildKit 0.10 and later, which Docker Engine 23 and every Buildx
 builder provide.
 
-`--no-cache` runs every step again and changes nothing else: both cache mounts stay in use, and
-no build argument differs from an ordinary build. That last part matters. A build argument is
-part of the cache key of every later step in its stage, so if a clean build also set one, its
-layers would be stored under keys that no ordinary build asks for, and the next ordinary build
-would resolve to the layers from before the refresh.
+`--no-cache` runs every step again, and BuildKit deletes the cache mounts of such a build before
+it starts (measured on BuildKit 0.34; a maintainer describes it as intended in
+[moby/buildkit#7088](https://github.com/moby/buildkit/issues/7088)). A clean build therefore
+downloads and compiles everything, and leaves both mounts filled for the builds after it. It
+changes no build argument, and that matters: a build argument is part of the cache key of every
+later step in its stage. If a clean build also set one, its results would be stored where no
+ordinary build looks, and the next ordinary build would run those steps again or, on an
+unchanged parent image, resolve to the layers from before the refresh.
 
 `OUSTER_DISABLE_CCACHE=1` compiles without the compiler cache, reading and writing nothing in
 it. It is an explicit request: export it for `tools/build_image.sh` (it passes through
-`rig build`), or pass the build argument yourself. Because it is a build argument, keep it on
-every build that should reuse that compile:
+`rig build`), or pass the build argument yourself. A `--no-cache` build starts from an empty
+compiler cache without it; what the flag adds there is that the cache also stays empty
+afterwards. Because it is a build argument, keep it on every build that should reuse that
+compile:
 
 ```bash
 docker buildx build --no-cache --pull --build-arg OUSTER_DISABLE_CCACHE=1 \
@@ -130,7 +136,7 @@ Measured with `rig build --arch amd64` on a deployment of zenoh-router, ros2-bag
 ouster instance (base image, messages overlay, this image), Docker Engine 29.9.2 with BuildKit
 0.34.0 (the built-in `docker` driver with the containerd image store), native x86-64, four CPUs
 and a local registry. Times are for this image's build step. They are single measurements; the
-apt download of the same 1.09 GB varied between 61 and 122 seconds.
+apt download of the same 1.09 GB varied between 43 and 122 seconds.
 
 | What changed since the previous build | rig v0.2.81, previous Dockerfile | Unchanged base digest kept, this Dockerfile |
 |---|---:|---:|
@@ -144,13 +150,35 @@ every step again, with the compiler cache warm (8.8 s of compilation) and 1.25 G
 downloaded again. The same work is what a real base change costs with the previous Dockerfile.
 With the download cache warm, the last row fetched 0 B of those packages and compiled in 8.5 s;
 unpacking the build dependencies (104 s) and installing the runtime dependencies (45 s) remain.
-The first build on an empty builder took 6m27s before these changes: 205 s for the build
-dependencies, 143 s to compile.
+The first build on an empty builder took 6m27s before these changes (205 s for the build
+dependencies, 143 s to compile) and 6m48s with them: nothing here makes a cold build faster.
 
-Not measured here: arm64, emulated builds, and a complete `--no-cache` build followed by an
-ordinary one. The cache-key behavior behind the `--no-cache` paragraph above was reproduced
-with a three-stage Dockerfile on the same builder: after a `--no-cache` build that also changed
-a build argument, the next ordinary build returned the image from before it.
+Clean builds, measured the same way with the rig that keeps an unchanged digest:
+
+| Build | Time for this image |
+|---|---:|
+| `rig build --no-cache` | 7m46s |
+| The ordinary `rig build` after it | 1s |
+| The ordinary `rig build` after that | 1s |
+
+BuildKit empties both cache mounts for the clean build, so it downloads 1.2 GB and compiles
+from an empty compiler cache. The ordinary builds after it are fully cached (4.9 s and 4.7 s
+for the whole deployment) and publish exactly the clean build's images: the same index digest
+and the same layers, for the base image, the messages overlay and this image.
+
+The previous build script also set `OUSTER_DISABLE_CCACHE=1` for a clean build. That stored the
+compile under a cache key that no ordinary build asks for and left the compiler cache empty, so
+the ordinary build after a clean build had to compile everything again (143 s of compilation
+on this machine) before it could publish. That sequence was not measured end to end: the
+attempt stalled on a throttled package mirror.
+
+Not measured here either: arm64 and emulated builds. The cache-key behavior behind the
+`--no-cache` paragraph above was also reproduced with a three-stage Dockerfile on the same
+builder: after a `--no-cache` build that changed a build argument on an unchanged parent image,
+the next ordinary build returned the image from before it. The cache-mount deletion was
+reproduced with a one-step Dockerfile that appends a line to a file in a cache mount: a
+`--no-cache` build found the file gone, and the ordinary build after it found only that
+build's line.
 
 ### Build measurements (2026-10-21)
 

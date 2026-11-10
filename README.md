@@ -92,10 +92,10 @@ architecture for standalone builds; Rig's `RIG_BUILD_PLATFORMS` takes precedence
 `RIG_BUILD_NO_CACHE=1` passes `--no-cache --pull` on both build paths, and the build
 reports the published digest through `RIG_BUILD_RESULT`. Rig uses `OUSTER_IMAGE`
 to select the catalog image by digest during deployment and reconstruction.
-A `--no-cache` build runs every step again but changes no build argument, so the ordinary
-build after it reuses exactly those refreshed layers. The compiler cache and the build stages'
-apt downloads stay in use; see [docker/README.md](docker/README.md#build-the-runtime-image)
-for both and for `OUSTER_DISABLE_CCACHE=1`.
+A `--no-cache` build runs every step again, from empty cache mounts, and changes no build
+argument, so the ordinary build after it reuses exactly those refreshed layers. See
+[docker/README.md](docker/README.md#build-the-runtime-image) for the cache mounts and for
+`OUSTER_DISABLE_CCACHE=1`.
 
 With Rig v0.2.74 or later the image build clones nothing itself. The rigging's
 `build.sources` declares the two pinned repositories, rig serves them from its local git

@@ -95,9 +95,10 @@ if "--metadata-file" in args:
         return sorted(build[i + 1] for i, arg in enumerate(build) if arg == "--build-arg")
 
     def test_no_cache_changes_no_build_argument(self):
-        """A build-arg is part of the cache key of every step in its stage. If --no-cache also
-        flipped one, its layers would be stored under keys no ordinary build asks for, and the
-        next ordinary build would resolve to the layers from BEFORE the refresh."""
+        """A build-arg is part of the cache key of every later step in its stage. If --no-cache
+        also flipped one, its results would be stored where no ordinary build looks: the next
+        ordinary build would run those steps again or, on an unchanged parent image, resolve
+        to the layers from BEFORE the refresh."""
         for env in ({}, {"RIG_BUILD_PLATFORMS": "linux/arm64,linux/amd64"}, {PLATFORM_ENV: "linux/amd64"}):
             with self.subTest(env=env):
                 ordinary = self.successful_build(**env)[0]

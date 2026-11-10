@@ -10,8 +10,9 @@
 #   RIG_BUILD_NO_CACHE  set => --no-cache --pull. --pull matters: a deliberate `rig build
 #                       --no-cache` re-pulls the parent image, so the fleet's ros-* version
 #                       authority advances for all images together (see docker/Dockerfile.runtime).
-#                       Every step runs again; the compiler cache and the build stages' apt
-#                       downloads stay in use (cache mounts, keyed by content — see below).
+#                       Every step runs again, from empty cache mounts (BuildKit deletes
+#                       them for a --no-cache build), and no build argument changes, so
+#                       the next ordinary build reuses exactly these layers.
 #   RIG_BUILD_PULL      0 => no --pull (`rig build --offline` sets it, with RIG_OFFLINE=1).
 #   RIG_BUILD_SOURCES   rig >= v0.2.74: rigging.yaml `build.sources` exported from rig's local git
 #                       mirrors (one directory per source plus sources.tsv: name, repo, ref,
@@ -30,10 +31,11 @@
 # RIG_BUILD_PLATFORMS takes precedence over OUSTER_BUILD_PLATFORM under rig.
 #
 # OUSTER_DISABLE_CCACHE=1 compiles without the compiler cache (it is neither read nor written).
-# It is the caller's explicit choice and rides along with rig's environment; `--no-cache` alone
-# does not imply it. The flag is a build-arg, so it is part of the compile step's cache key: the
-# layers such a build stores are reused only by another build that also sets it, and the next
-# ordinary build compiles again.
+# It is the caller's explicit choice and rides along with rig's environment; `--no-cache` does
+# not imply it and does not need it, because that build's compiler cache starts empty anyway.
+# The flag is a build-arg, so it is part of the compile step's cache key: only a build that
+# also sets it reuses that compile. An ordinary build afterwards compiles again, or returns an
+# older ordinary compile if the parent image is unchanged and the builder still holds one.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=tools/rig-build.sh
