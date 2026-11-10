@@ -54,6 +54,16 @@ build:
 images:
   override_env: {ouster_driver: OUSTER_IMAGE}
 
+# Replay startup policy (rig >= v0.2.61, the release the build block above already needs; an
+# older rig rejects the key). The driver needs its physical sensor, so a replay does not start
+# it: the recorded Ouster topics come back through the bag player. Declaring that here makes
+# replay plans report the instance as omitted with its bag topics still eligible, and keeps
+# `rig build --scope replay` from building this image for every replay architecture (an emulated
+# C++ build of an image no replay host runs). A positional instance name, `--live`,
+# `--include-service ouster` or a version-2 recipe's `session.instances` still start the live
+# driver; build its image for that host with `rig build ouster --arch <cpu>`.
+replay: {start: false}
+
 # Interface packages this service's published types come from — consumed (by rig ≥ v0.2.28, or a
 # hand-authored union manifest) to build the deployment's fleet-ros-msgs overlay so the shared bag
 # logger can record our topics. Interface packages ONLY, never the driver stack. NOT declared:

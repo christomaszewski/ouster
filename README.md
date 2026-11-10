@@ -92,6 +92,10 @@ architecture for standalone builds; Rig's `RIG_BUILD_PLATFORMS` takes precedence
 `RIG_BUILD_NO_CACHE=1` passes `--no-cache --pull` on both build paths, and the build
 reports the published digest through `RIG_BUILD_RESULT`. Rig uses `OUSTER_IMAGE`
 to select the catalog image by digest during deployment and reconstruction.
+A `--no-cache` build runs every step again but changes no build argument, so the ordinary
+build after it reuses exactly those refreshed layers. The compiler cache and the build stages'
+apt downloads stay in use; see [docker/README.md](docker/README.md#build-the-runtime-image)
+for both and for `OUSTER_DISABLE_CCACHE=1`.
 
 With Rig v0.2.74 or later the image build clones nothing itself. The rigging's
 `build.sources` declares the two pinned repositories, rig serves them from its local git
@@ -104,13 +108,19 @@ rig build --offline
 ```
 
 Image layers still come from the build cache, so an offline build needs one earlier online build
-of the same apt and rosdep steps. Under rig the SDK's build header reports its git hash as
+of the same apt and rosdep steps. The Dockerfile names no `# syntax=` frontend, so a cached build
+resolves nothing on Docker Hub either. Under rig the SDK's build header reports its git hash as
 `unknown` because exported trees carry no `.git`. The exact commits remain in
 `/opt/ouster_driver/share/upstream-sources.json` and `/opt/fleet-msgs/provenance.yaml`.
 
 Ordinary Rig bag replay republishes the recorded Ouster topics through the bag
-player and does not start this sensor-tier driver by default. Explicitly selecting
-the live driver still requires a reachable sensor. The separate raw-packet replay
+player and does not start this sensor-tier driver. `rigging.yaml` declares that as
+`replay: {start: false}`: replay plans list the instance as omitted with its bag topics
+still eligible, and `rig build --scope replay` no longer builds this image for every replay
+architecture. Selecting the live driver explicitly (an instance name, `--live`,
+`--include-service ouster`, or a version-2 recipe's `session.instances`) still works and
+still requires a reachable sensor; build the image for that host with
+`rig build ouster --arch <cpu>`. The separate raw-packet replay
 compose workflow remains available for regenerating points from packets.
 
 CI builds the runtime on native arm64 and amd64 runners and runs
@@ -122,7 +132,8 @@ to verify the launcher and no-cache build contract without starting a sensor.
 One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
 
 - `connection.type: lidar` with `connection.lidar.{sensor_hostname, udp_dest, lidar_port, imu_port}`
-  — mapped onto the upstream params by `render_params.py`.
+  — mapped onto the upstream params by `render_params.py`. `sensor_hostname` is required: the
+  launcher refuses `up` and `config` without it, before any container is created.
 - `ros.namespace` — becomes `ouster_ns` (so topics are `/<ns>/points`, `/<ns>/imu`, …).
   It defaults to the instance name, which is also the namespace rig assumes when it associates
   topics with instances (`rig graph`, replay topic ownership). A per-config namespace cannot be
@@ -208,6 +219,9 @@ requested state, including when reusing an existing container. Its default budge
 
 Runtime requests are saved in `/var/lib/ouster/target-state` inside the container, so a Docker
 restart retains the latest request. Recreating the container uses the configured initial state.
+The file is synced to disk before it replaces the previous one. If it is unreadable or holds
+anything but `active` or `standby` (for example after a power cut), the supervisor logs a
+warning and starts with the configured initial state instead of failing every restart.
 Foreground `up` attached to an existing container preserves its runtime target; use `activate`,
 `standby`, or detached `up -d` to change it. A sensor power cycle while parked is detected and
 the sensor is parked again when reachable.
@@ -228,7 +242,8 @@ waiting for standby. These are maximum failure budgets, not fixed delays. Logs r
 drain time, driver stop time, signal escalation, and total shutdown sequence time so driver delay
 can be distinguished from sensor parking. The launcher stops the container first, checks its exit status, and
 prints the last 40 log lines if shutdown failed, before removing it. A failed park or forced
-kill therefore makes `rig down` return nonzero. Direct `docker compose down` bypasses that
+kill therefore makes `rig down` return nonzero. If the stop command itself fails, the launcher
+reports that and still removes the container. Direct `docker compose down` bypasses that
 exit-status check; its success alone does not prove sensor standby.
 
 Use `shutdown_state: unchanged` to stop the driver while leaving the sensor mode alone.
@@ -361,6 +376,14 @@ including operation, stream availability, temperature, input voltage/current/pow
 sensor alerts. It polls read-only `/api/v1/sensor/telemetry` and `/api/v1/sensor/alerts` even
 in standby, while skipping transitions. Power is input mV × mA / 1,000,000 watts; unavailable
 readings are not zero. The existing temperature topic remains available.
+
+Stream health samples the driver's `telemetry` topic once per heartbeat instead of handling
+every message. The driver publishes one message per lidar packet (640 to 1,280 per second); the
+health node keeps only the newest in a depth-1 subscription that its executor never waits on,
+and each heartbeat takes it without deserializing. Measured in the runtime image on a 2.3 GHz
+x86-64 core with Fast DDS, a Python callback per packet cost 20% of a core at 640 packets/s and
+32% at 1,280; sampling costs 2% and 3%. `packets.received` therefore counts heartbeats that
+found a new packet, not packets, and a stopped stream is reported one heartbeat later at most.
 
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,
