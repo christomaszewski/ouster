@@ -90,12 +90,30 @@ if "--metadata-file" in args:
         build, _ = self.successful_build(**{PLATFORM_ENV: "linux/amd64"})
         self.assertEqual(build[build.index("--platform") + 1], "linux/amd64")
 
-    def test_clean_standalone_platform_build_disables_compiler_cache(self):
-        build, _ = self.successful_build(
-            RIG_BUILD_NO_CACHE="1", **{PLATFORM_ENV: "linux/amd64"})
-        self.assertEqual(build[build.index("--platform") + 1], "linux/amd64")
-        self.assertIn("--no-cache", build)
-        self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
+    @staticmethod
+    def build_args(build):
+        return sorted(build[i + 1] for i, arg in enumerate(build) if arg == "--build-arg")
+
+    def test_no_cache_changes_no_build_argument(self):
+        """A build-arg is part of the cache key of every step in its stage. If --no-cache also
+        flipped one, its layers would be stored under keys no ordinary build asks for, and the
+        next ordinary build would resolve to the layers from BEFORE the refresh."""
+        for env in ({}, {"RIG_BUILD_PLATFORMS": "linux/arm64,linux/amd64"}, {PLATFORM_ENV: "linux/amd64"}):
+            with self.subTest(env=env):
+                ordinary = self.successful_build(**env)[0]
+                clean = self.successful_build(RIG_BUILD_NO_CACHE="1", **env)[0]
+                self.assertNotIn("--no-cache", ordinary)
+                self.assertIn("--no-cache", clean)
+                self.assertEqual(self.build_args(clean), self.build_args(ordinary))
+                self.assertNotIn("OUSTER_DISABLE_CCACHE=1", clean)
+
+    def test_compiler_cache_bypass_is_an_explicit_request(self):
+        for env in ({}, {"RIG_BUILD_NO_CACHE": "1"}, {"RIG_BUILD_PLATFORMS": "linux/arm64"}):
+            with self.subTest(env=env):
+                build = self.successful_build(OUSTER_DISABLE_CCACHE="1", **env)[0]
+                self.assertIn("OUSTER_DISABLE_CCACHE=1", self.build_args(build))
+        build = self.successful_build(OUSTER_DISABLE_CCACHE="0", RIG_BUILD_NO_CACHE="1")[0]
+        self.assertNotIn("OUSTER_DISABLE_CCACHE=1", build)
 
     def test_no_cache_and_fleet_parent_reach_both_build_paths(self):
         for platforms in ("", "linux/arm64,linux/amd64"):
@@ -105,7 +123,6 @@ if "--metadata-file" in args:
                     ROS_DISTRO="fleet-distro", RIG_BASE_IMAGE="registry.test/fleet@sha256:123")[0]
                 self.assertIn("--no-cache", build)
                 self.assertIn("--pull", build)
-                self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
                 self.assertIn("ROS_DISTRO=fleet-distro", build)
                 self.assertIn("BASE_IMAGE=registry.test/fleet@sha256:123", build)
 
@@ -157,7 +174,6 @@ if "--metadata-file" in args:
         build, _ = self.successful_build(RIG_BUILD_NO_CACHE="1", RIG_BUILD_PULL="0")
         self.assertIn("--no-cache", build)
         self.assertNotIn("--pull", build)
-        self.assertIn("OUSTER_DISABLE_CCACHE=1", build)
 
     def build_sources(self, **commits):
         """A RIG_BUILD_SOURCES directory as rig exports it: one tree per rigging build.sources

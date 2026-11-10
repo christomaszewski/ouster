@@ -64,13 +64,42 @@ Dependency installation is cached by the fetched `package.xml` contents, so a so
 pin change reuses the installed toolchain. Runtime dependencies can install while the driver
 compiles. Production uses Ninja and ccache; `--build-arg BUILD_JOBS=2` bounds compilation
 when needed (production defaults to available CPUs, regression builds default to two jobs).
-The compiler cache is a BuildKit mount, scoped by ROS distro and architecture, with a 1 GiB
-limit. CI explicitly restores/saves that mount in addition to its Docker layer caches.
-Printed ccache statistics accumulate across builds; compare changes in hit/miss counts
-to assess one rebuild.
 
-Docker's `--no-cache` bypasses layers but does not empty compiler-cache mounts. The rig
-helper additionally passes `OUSTER_DISABLE_CCACHE=1` for a clean build. For a direct build:
+Two BuildKit cache mounts, each scoped by ROS distro and architecture, cover the steps that
+have to run again (a new parent image, a changed manifest, a new source pin):
+
+- **Compiler cache** (`ouster-ccache-…`, 1 GiB limit). ccache answers from the content of each
+  source, header and the compiler binary, so it stays valid when the layers under it change.
+  Printed ccache statistics accumulate across builds; compare changes in hit/miss counts to
+  assess one rebuild. CI explicitly restores/saves this mount in addition to its Docker layer
+  caches.
+- **apt downloads** (`ouster-apt-…`, toolchain and build-dependency stages only). The build
+  dependencies are about 1.2 GB of `.deb` files, most of it the PCL/VTK toolchain that
+  `pcl_conversions` depends on. The build stages replace the parent's `docker-clean` hook so
+  those files stay in the mount, and a re-run unpacks them from the builder's disk instead of
+  downloading them again. The runtime stage is unchanged: it keeps the parent's hook and uses
+  no cache mount, so nothing about the shipped image depends on the builder.
+
+Both mounts live in the builder. `docker buildx prune` (or BuildKit's own garbage collection of
+mounts unused for a couple of days) empties them; the next build then downloads and compiles
+once more.
+
+The Dockerfile has no `# syntax=` line. With one, every build first resolves `docker/dockerfile`
+on Docker Hub, including a build whose steps are all cached; a registry rate limit or a
+disconnected builder then fails it. Its features (heredocs, `RUN --mount`, named build contexts)
+are in the frontend built into BuildKit 0.10 and later, which Docker Engine 23 and every Buildx
+builder provide.
+
+`--no-cache` runs every step again and changes nothing else: both cache mounts stay in use, and
+no build argument differs from an ordinary build. That last part matters. A build argument is
+part of the cache key of every later step in its stage, so if a clean build also set one, its
+layers would be stored under keys that no ordinary build asks for, and the next ordinary build
+would resolve to the layers from before the refresh.
+
+`OUSTER_DISABLE_CCACHE=1` compiles without the compiler cache, reading and writing nothing in
+it. It is an explicit request: export it for `tools/build_image.sh` (it passes through
+`rig build`), or pass the build argument yourself. Because it is a build argument, keep it on
+every build that should reuse that compile:
 
 ```bash
 docker buildx build --no-cache --pull --build-arg OUSTER_DISABLE_CCACHE=1 \
@@ -86,6 +115,42 @@ The opt-in regression stage reuses production Release objects without installing
 production overlay, and verifies both properties in `/workspace/upstream-tests/build-reuse.json`.
 The SDK receive regressions still use a separate AddressSanitizer build. Tests and compiler
 caches remain outside the runtime image.
+
+### Rebuilds under `rig build` (2026-11-10)
+
+Every step of this Dockerfile is keyed on the digest of `BASE_IMAGE`. Under rig that is the
+deployment's base image by digest, and rig v0.2.81 hands over a new digest after every base
+build, including one whose steps were all cached: the index it publishes carries a provenance
+attestation that is unique to the build. BuildKit then runs every step here again although
+nothing changed, and the image it publishes has new layers each time. A rig that keeps the
+digest of an unchanged base (proposed for the release after v0.2.81) removes that; the cache
+mounts above cover the rebuilds that remain legitimate.
+
+Measured with `rig build --arch amd64` on a deployment of zenoh-router, ros2-bag-logger and one
+ouster instance (base image, messages overlay, this image), Docker Engine 29.9.2 with BuildKit
+0.34.0 (the built-in `docker` driver with the containerd image store), native x86-64, four CPUs
+and a local registry. Times are for this image's build step. They are single measurements; the
+apt download of the same 1.09 GB varied between 61 and 122 seconds.
+
+| What changed since the previous build | rig v0.2.81, previous Dockerfile | Unchanged base digest kept, this Dockerfile |
+|---|---:|---:|
+| Nothing | 6m32s | 1s |
+| A supervisor file under `docker/entrypoints/` | every step again, as above | 1s |
+| A comment in `ouster.repos` | every step again, as above | 1s |
+| The base image's content | 6m32s | 2m27s |
+
+The first column is one measurement: with rig v0.2.81 the build saw a new base digest and ran
+every step again, with the compiler cache warm (8.8 s of compilation) and 1.25 GB of packages
+downloaded again. The same work is what a real base change costs with the previous Dockerfile.
+With the download cache warm, the last row fetched 0 B of those packages and compiled in 8.5 s;
+unpacking the build dependencies (104 s) and installing the runtime dependencies (45 s) remain.
+The first build on an empty builder took 6m27s before these changes: 205 s for the build
+dependencies, 143 s to compile.
+
+Not measured here: arm64, emulated builds, and a complete `--no-cache` build followed by an
+ordinary one. The cache-key behavior behind the `--no-cache` paragraph above was reproduced
+with a three-stage Dockerfile on the same builder: after a `--no-cache` build that also changed
+a build argument, the next ordinary build returned the image from before it.
 
 ### Build measurements (2026-10-21)
 

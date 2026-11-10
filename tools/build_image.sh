@@ -10,6 +10,8 @@
 #   RIG_BUILD_NO_CACHE  set => --no-cache --pull. --pull matters: a deliberate `rig build
 #                       --no-cache` re-pulls the parent image, so the fleet's ros-* version
 #                       authority advances for all images together (see docker/Dockerfile.runtime).
+#                       Every step runs again; the compiler cache and the build stages' apt
+#                       downloads stay in use (cache mounts, keyed by content — see below).
 #   RIG_BUILD_PULL      0 => no --pull (`rig build --offline` sets it, with RIG_OFFLINE=1).
 #   RIG_BUILD_SOURCES   rig >= v0.2.74: rigging.yaml `build.sources` exported from rig's local git
 #                       mirrors (one directory per source plus sources.tsv: name, repo, ref,
@@ -26,6 +28,12 @@
 # Cross-arch vehicle: export OUSTER_BUILD_PLATFORM=linux/<arch> (default: host-native). The heavy
 # C++/PCL/SDK compile is slow under qemu — prefer a native arm64 host/runner for Jetson images.
 # RIG_BUILD_PLATFORMS takes precedence over OUSTER_BUILD_PLATFORM under rig.
+#
+# OUSTER_DISABLE_CCACHE=1 compiles without the compiler cache (it is neither read nor written).
+# It is the caller's explicit choice and rides along with rig's environment; `--no-cache` alone
+# does not imply it. The flag is a build-arg, so it is part of the compile step's cache key: the
+# layers such a build stores are reused only by another build that also sets it, and the next
+# ordinary build compiles again.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=tools/rig-build.sh
@@ -36,8 +44,7 @@ TAG="${2:-latest}"
 IMAGE="${REGISTRY}/ouster_driver:${TAG}"
 
 set --
-if [ -n "${RIG_BUILD_NO_CACHE:-}" ]; then
-  # Docker --no-cache bypasses layers, but leaves compiler-cache mounts intact.
+if [ "${OUSTER_DISABLE_CCACHE:-0}" = 1 ]; then
   set -- --build-arg OUSTER_DISABLE_CCACHE=1 "$@"
 fi
 if [ -z "${RIG_BUILD_PLATFORMS:-}" ] && [ -n "${OUSTER_BUILD_PLATFORM:-}" ]; then
