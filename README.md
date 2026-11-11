@@ -252,8 +252,9 @@ A running container has two operational states, managed through the launcher:
   (firmware 2.5.3) driven from a Jetson Orin, a driver process frozen for 8 seconds was asked
   again once and left running, and one frozen for good was replaced and active again 43 seconds
   after it stopped answering, about 14 of them spent asking again. No observation went
-  unanswered on its own in a 16-minute run there, so how often the repeats
-  (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) are needed in the field is still unmeasured.
+  unanswered on its own in a 16-minute run there, nor in ten minutes with all twelve cores of
+  the Orin kept busy, so how often the repeats (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) are needed
+  in the field is still unmeasured.
 
 Firmware below 3.1 (including 2.4) uses the legacy config commands followed by `reinitialize`;
 newer firmware uses explicit nonpersistent staging. Temporary HTTP failures during spin-up
@@ -470,9 +471,11 @@ checked for skipped events as usual and keeps its `alerts.epoch`; a cursor that 
 from zero gets a new `alerts.epoch` without a gap. Polling pauses during a mode change, so
 alerts the sensor logs inside one are not followed. Seen on an OS-0-128 with firmware 2.5.3:
 `initialization_id` rises on every reinitialization (by two for a change to standby, by one for
-a change to normal or an outside `reinitialize`), and the alert cursor carries on across all of
-them, so a reinitialization by itself lost no alert history there. A reboot or power cycle was
-not tried.
+a change to normal, an outside `reinitialize` or the driver's own `reset` service), and the
+alert cursor carries on across all of them, so a reinitialization by itself lost no alert history
+there. The flag stayed false through the supervisor's own mode changes and turned true after the
+outside `reinitialize` and after the `reset` service. A reboot or power cycle was not tried; this
+firmware has no restart command over HTTP.
 
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,
