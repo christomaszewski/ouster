@@ -370,6 +370,14 @@ compatible with this ROS driver. An SDK-only update does not change
 `ouster_sensor_msgs`, so leave the two ROS source references matched to each other.
 The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).
 
+The fork reads the optional mask image (`mask_path`) with a bundled single-header decoder
+instead of OpenCV, which the driver used for nothing else, so neither the build nor the runtime
+image installs OpenCV. PNG, JPEG, BMP, GIF, TGA, PSD and binary PGM/PPM masks are accepted; TIFF
+and WebP, which only OpenCV could read, are refused with a load error that lists the supported
+formats, and the service then reports `transitioning` while the driver keeps failing to start.
+The fork's tests decode each format and fit a mask to the scan; the regression target runs them.
+Keep this patch until upstream no longer needs OpenCV.
+
 Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to
 replace an existing `src/ouster-ros`; preserve any local work and select a fresh source directory
 when changing pins. Running `vcs import` against only `ouster.repos` omits the SDK override.

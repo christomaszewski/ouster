@@ -16,10 +16,10 @@ git mirrors (rigging.yaml `build.sources`) and `tools/build_image.sh` passes the
 
 The runtime image resolves deps with `rosdep` (from the vendored `package.xml`) rather than a
 hand-maintained apt list, so it tracks upstream automatically — with two slimming carve-outs:
-apt Recommends are off stage-wide, and `pcl_conversions`/`cv_bridge` are skipped at exec time
-because the driver uses them header-only (their debs hard-depend on `libpcl-dev`/`libopencv-dev`,
-which would drag ~5 GB of compilers, VTK, Java and Boost -dev into the image); the three OpenCV
-runtime libs the binaries do link are derived from cv_bridge's own deb metadata at build time.
+apt Recommends are off stage-wide, and `pcl_conversions` is skipped at exec time because the
+driver uses it header-only (its deb hard-depends on `libpcl-dev`, which would drag ~5 GB of
+compilers, VTK, Java and Boost -dev into the image). The image carries no OpenCV: the pinned
+driver decodes its optional mask image with a bundled single-header decoder.
 Optional SDK features (pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime
 correct and slim.
 Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at

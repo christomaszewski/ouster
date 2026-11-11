@@ -12,11 +12,12 @@
 # reliable replay and regressions for both maximum-rate legacy lidar modes.
 # Live raw publishing uses bounded per-stream workers, isolating UDP reception
 # from subscriber backpressure, with loopback and sensor-callback regressions.
-# Retained by fork branch codex/scan-timestamp-ownership. See README "Updating upstream".
+# The optional mask image is decoded by a bundled stb_image, so the driver links no OpenCV.
+# Retained by fork branch mask-loader-without-opencv. See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
 repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: c1214cd2f6d8b72be27bab464a667688760b0cc4
+    version: 59d1d9497218b5e526e15c07d988b76e607cbb58

@@ -120,7 +120,7 @@ for relative in find_packages(str(root)):
 PY
 
 # Copy only manifests into the dependency stage: a source pin change with identical
-# dependencies must not reinstall the large PCL/OpenCV build toolchain.
+# dependencies must not reinstall the large PCL build toolchain.
 FROM toolchain AS build-deps
 COPY --from=sources /workspace/deps /workspace/deps
 RUN --mount=type=cache,id=ouster-apt-${ROS_DISTRO}-${TARGETARCH},target=/var/cache/apt/archives,sharing=locked \
@@ -225,20 +225,15 @@ COPY --from=sources /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tm
 # Wrapper deps and upstream manifest gaps (see the file's header):
 # rides the same rosdep pass as the upstream manifests, so nothing is hand-pinned to a soname.
 COPY docker/runtime_extra_deps/package.xml /tmp/deps/ouster_wrapper_runtime_deps/package.xml
-# pcl_conversions and cv_bridge are skipped: the driver uses both HEADER-ONLY — the shipped .so's
-# link no libpcl* and no libcv_bridge (the ldd gate below is the proof) — yet their debs
-# hard-depend on libpcl-dev/libopencv-dev, dragging ~5 GB of toolchain (gcc/gfortran), VTK, Java
-# and Boost -dev into an exec-only image. The three OpenCV runtime libs the driver DOES link
-# (core/imgcodecs/imgproc) are derived from cv_bridge's own deb metadata below, so the sonames
-# stay distro-maintained, never hand-pinned here. If a future pin starts linking either library
-# for real, the ldd gate fails the build and this carve-out must be revisited.
+# pcl_conversions is skipped: the driver uses it HEADER-ONLY — the shipped .so's link no libpcl*
+# (the ldd gate below is the proof) — yet its deb hard-depends on libpcl-dev, dragging ~5 GB of
+# toolchain (gcc/gfortran), VTK, Java and Boost -dev into an exec-only image. If a future pin
+# starts linking it for real, the ldd gate fails the build and this carve-out must be revisited.
+# No OpenCV is installed: the pinned driver decodes its optional mask image itself.
 RUN apt-get update \
  && rosdep update --rosdistro "${ROS_DISTRO}" \
  && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro "${ROS_DISTRO}" \
-      --dependency-types=exec --skip-keys "pcl_conversions cv_bridge" \
- && apt-get install -y --no-install-recommends \
-      $(apt-cache depends --no-recommends "ros-${ROS_DISTRO}-cv-bridge" \
-        | awk '/Depends:/{print $2}' | grep '^libopencv-' | grep -v -- '-dev$') \
+      --dependency-types=exec --skip-keys "pcl_conversions" \
  && rm -rf /tmp/deps /var/lib/apt/lists/* /root/.ros
 
 COPY --from=build /workspace/install /opt/ouster_driver

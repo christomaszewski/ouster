@@ -90,7 +90,10 @@ driver_params:
   # max_range: 1000.0           # metres; must exceed min_range
   # v_reduction: 1              # keep one in every 1/2/4/8/16 vertical beams
   # min_scan_valid_columns_ratio: 0.0 # 0..1; reject scans below this usable-column fraction
-  # mask_path: ""               # optional mask image path INSIDE the container; provide file/mount
+  # mask_path: ""               # optional mask image path INSIDE the container. Black pixels blank
+                                # the measurement at that position. PNG, JPEG, BMP, GIF, TGA, PSD or
+                                # binary PGM/PPM; prefer a lossless format. The deploy compose mounts
+                                # no extra files: put the image in the metadata volume (/root/.ros).
   # metadata: ""                # empty writes ~/.ros/<sensor hostname>_metadata.json
   # The wrapper mounts a persistent per-instance metadata volume at /root/.ros. A custom path
   # needs to exist/be writable inside the container; arbitrary host paths are not auto-mounted.

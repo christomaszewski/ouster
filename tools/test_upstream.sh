@@ -173,6 +173,14 @@ LD_LIBRARY_PATH="${ros_build}:${LD_LIBRARY_PATH:-}" \
   "${ros_build}/ouster_ros_raw_packet_sensor_test" \
   ouster_ros_raw_packet_sensor_test
 
+# Decode each accepted mask format, refuse the others, and fit a mask to the scan
+# through the same library entry point the nodes use.
+cmake --build "${ros_build}" \
+  --target ouster_ros_mask_image_test --parallel "${build_jobs}"
+run_gtest \
+  "${ros_build}/ouster_ros_mask_image_test" \
+  ouster_ros_mask_image_test
+
 # Check QoS upgrades for older bags, namespace remaps, and generated-profile
 # cleanup. Explicitly reject an empty suite if a future pin removes these tests.
 python3 - "${ros_source}/test" "${test_root}/results/replay_packet_launch_test.json" <<'PY'
