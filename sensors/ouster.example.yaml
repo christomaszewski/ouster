@@ -90,10 +90,9 @@ driver_params:
   # max_range: 1000.0           # metres; must exceed min_range
   # v_reduction: 1              # keep one in every 1/2/4/8/16 vertical beams
   # min_scan_valid_columns_ratio: 0.0 # 0..1; reject scans below this usable-column fraction
-  # mask_path: ""               # optional mask image path INSIDE the container. Black pixels blank
-                                # the measurement at that position. PNG, JPEG, BMP, GIF, TGA, PSD or
-                                # binary PGM/PPM; prefer a lossless format. The deploy compose mounts
-                                # no extra files: put the image in the metadata volume (/root/.ros).
+  # mask_path: ""               # a mask image ALREADY INSIDE the container (for example in the
+                                # metadata volume, /root/.ros). For an image on the host use the
+                                # top-level `mask:` block below instead; setting both is an error.
   # metadata: ""                # empty writes ~/.ros/<sensor hostname>_metadata.json
   # The wrapper mounts a persistent per-instance metadata volume at /root/.ros. A custom path
   # needs to exist/be writable inside the container; arbitrary host paths are not auto-mounted.
@@ -157,6 +156,22 @@ driver_params:
 #   #   supply.power_w: {warn_above: 30.0, error_above: 40.0}
 # All health timing/limit values must be finite numbers (not strings/bools). Unknown setting or
 # bound names are rejected. A metric that is absent/non-numeric cannot be thresholded.
+
+# Mask image: black pixels blank the measurement at the same position of every scan (points
+# leave the cloud; the range, signal, reflectivity and near-IR images are zero there). Only pixels
+# whose 8-bit gray value is exactly 0 mask. The image should be scan-sized (rows = beams, columns
+# = azimuth steps); another size is resized with nearest-neighbour sampling and a warning.
+# PNG, JPEG, BMP, GIF, PSD, TIFF and binary PGM/PPM are accepted, and TGA when named *.tga;
+# prefer a lossless format, because JPEG leaves faint noise beside an edge that does not mask.
+# `path` is a file on the HOST. An absolute path is taken as written; a relative one is looked
+# for in this config file's directory and then in each directory above it, so a path written
+# from the deployment root (config/sensors/front-mask.png) works whether or not rig renders the
+# config. The launcher copies the file, mounts the copy read-only and sets the driver's mask_path;
+# `up` fails before starting anything when the file is missing or not such an image. A redrawn
+# mask takes effect at the next `up`.
+#
+# mask:
+#   path: config/sensors/front-mask.png
 
 # Zenoh session settings (only consumed with RMW_IMPLEMENTATION=rmw_zenoh_cpp).
 # They become leaf path=json overrides applied after the incoming ZENOH_CONFIG_OVERRIDE value.

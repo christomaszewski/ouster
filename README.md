@@ -156,6 +156,19 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   connection keys here — they come from the `connection` block.
 - `shutdown_state: standby` (default) — physically park on container shutdown;
   `unchanged` stops the driver without changing the sensor's operating mode.
+- `mask.path` (optional) — an image on the host whose black pixels blank the measurements at
+  the same position of every scan. PNG, JPEG, BMP, GIF, PSD, TIFF and binary PGM/PPM are
+  accepted, and TGA when the file is named `*.tga`. An absolute path is taken as written; a
+  relative one is looked for in the config file's directory and then in each directory above
+  it, nearest first, so `config/sensors/front-mask.png` written from the deployment root is
+  found both from the config itself and from the copy rig renders under `var/rendered/`. A
+  mask kept in the deployment's `config/` folder travels with a baked artifact. The launcher
+  copies the file to `var/run/<name>.<content hash>.mask`, mounts that copy read-only at
+  `/etc/ouster_driver/mask` and sets the driver's `mask_path` to it, so a redrawn mask selects a
+  new mount at the next `up` and editing the original never changes what a running driver
+  reads. `up` and `config` fail, before any container is created, when the file is missing,
+  empty or not one of those formats. `driver_params.mask_path` still names a file already
+  inside the container; setting both is an error.
 
 ### Temperature and thermal status
 
@@ -382,7 +395,8 @@ image installs OpenCV. PNG, JPEG, BMP, GIF, TGA, PSD and binary PGM/PPM masks ar
 that bundled decoder and TIFF by libtiff, which the image gets through the fork's manifest.
 WebP and the rarer formats only OpenCV could read are refused with a load error that lists the
 supported formats; when such a file reaches the driver through `driver_params.mask_path`, the
-service reports `transitioning` while the driver keeps failing to start. The fork's tests decode each format and fit a mask to the scan;
+service reports `transitioning` while the driver keeps failing to start (the launcher catches
+it earlier for `mask.path`). The fork's tests decode each format and fit a mask to the scan;
 the regression target runs them. Keep this patch until upstream no longer needs OpenCV.
 
 Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to

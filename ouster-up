@@ -35,7 +35,8 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 # config -> instance identity (SERVICE / NAME / NAMESPACE / TYPE / INITIAL_STATE; plain tokens) +
-# the rendered ZENOH_OVERRIDE pair string (shell-quoted by the renderer, safe for this eval).
+# the rendered ZENOH_OVERRIDE pair string and the configured MASK path (both shell-quoted by the
+# renderer, safe for this eval).
 ENV_LINES="$("$PYTHON" "$REPO/tools/render_params.py" --env "$CONFIG_ABS")"
 eval "$(printf '%s\n' "$ENV_LINES" | sed 's/^/export /')"
 PROJECT="${SERVICE}_${NAME}"
@@ -52,12 +53,24 @@ case "${ARGS[0]}" in standby|activate|state) STATE_VERB="${ARGS[0]}";; esac
 # Hash the validated params into the bind-mount path. Compose otherwise cannot
 # detect edits inside a mounted file and may reuse a supervisor with a cached old
 # sensor address. Inspection and teardown never modify files mounted by a driver.
+# The optional mask image (config `mask.path`) is mounted the same way, from a copy named by
+# its content: a redrawn mask selects a new mount, and editing the original never changes
+# what a running driver reads. With no mask the compose file binds /dev/null there.
 PARAMS_HOST="$REPO/var/run/${NAME}.params.yaml"
+MASK_HOST=""
+MASK_SOURCE=""
+MASK_HASH=""
 case "${ARGS[0]}" in
   up|create|run|config|runtime-images|images)
     PARAMS_CONTENT="$("$PYTHON" "$REPO/tools/render_params.py" "$CONFIG_ABS")"
     PARAMS_HASH="$(printf '%s\n' "$PARAMS_CONTENT" | "$PYTHON" -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
     PARAMS_HOST="$REPO/var/run/${NAME}.${PARAMS_HASH}.params.yaml"
+    if [ -n "$MASK" ]; then
+      # Finds the file and refuses one the driver could only fail on (shell-quoted for this eval).
+      MASK_LINES="$("$PYTHON" "$REPO/tools/render_params.py" --mask "$CONFIG_ABS")"
+      eval "$MASK_LINES"
+      MASK_HOST="$REPO/var/run/${NAME}.${MASK_HASH}.mask"
+    fi
     ;;
 esac
 
@@ -66,6 +79,7 @@ esac
 # override -> RIG_IMAGE_REGISTRY -> local ouster_driver:latest), so a standalone run needs no rig
 # and no registry; export OUSTER_IMAGE to force a specific image.
 export OUSTER_PARAMS_HOST="$PARAMS_HOST"
+export OUSTER_MASK_HOST="$MASK_HOST"
 export OUSTER_NAMESPACE="$NAMESPACE"
 export OUSTER_NAME="$NAME"
 export OUSTER_HEALTH_CONFIG="$HEALTH_CONFIG"
@@ -156,6 +170,14 @@ case "${ARGS[0]}" in
     printf '%s\n' "$PARAMS_CONTENT" > "$PARAMS_TEMP"
     mv "$PARAMS_TEMP" "$PARAMS_HOST"
     trap - EXIT
+    if [ -n "$MASK_HOST" ] && [ ! -f "$MASK_HOST" ]; then  # an existing copy has the same content
+      MASK_TEMP="$(mktemp "$REPO/var/run/.${NAME}.mask.XXXXXX")"
+      trap 'rm -f "$MASK_TEMP"' EXIT
+      cp "$MASK_SOURCE" "$MASK_TEMP"
+      chmod 0644 "$MASK_TEMP"
+      mv "$MASK_TEMP" "$MASK_HOST"
+      trap - EXIT
+    fi
     ;;
 esac
 # Only startup creates the per-instance metadata volume. Inspection/state never do.
@@ -197,7 +219,7 @@ fi
 DETACHED=""
 for a in "${ARGS[@]:1}"; do case "$a" in -d|--detach) DETACHED=1;; esac; done
 if [ "${ARGS[0]}" = "up" ] && [ -n "$DETACHED" ]; then
-  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
+  echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST${MASK_SOURCE:+ mask=$MASK_SOURCE} target=$TARGET_STATE" >&2
   if [ "${RIG_RUNTIME_IMAGE_PINS+x}" ]; then
     "$PYTHON" "$REPO/tools/runtime_images.py" pinned-up "${FILES[@]}" -- "${ARGS[@]:1}"
   else
@@ -229,7 +251,7 @@ if [ "${ARGS[0]}" = "up" ] && [ -n "$DETACHED" ]; then
   done
 fi
 
-echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST target=$TARGET_STATE" >&2
+echo "ouster-up: project=$COMPOSE_PROJECT_NAME namespace=$NAMESPACE params=$PARAMS_HOST${MASK_SOURCE:+ mask=$MASK_SOURCE} target=$TARGET_STATE" >&2
 if [ "${ARGS[0]}" = up ] && [ "${RIG_RUNTIME_IMAGE_PINS+x}" ]; then
   exec "$PYTHON" "$REPO/tools/runtime_images.py" pinned-up "${FILES[@]}" -- "${ARGS[@]:1}"
 fi

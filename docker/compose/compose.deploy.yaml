@@ -52,6 +52,10 @@ services:
     volumes:
       # the single rendered params file, read-only (a single-file mount; not nested in any :ro dir)
       - ${OUSTER_PARAMS_HOST}:/etc/ouster_driver/params.yaml:ro
+      # the optional mask image (config `mask.path`), read-only at the path the rendered params
+      # name as mask_path. Without one the launcher leaves the variable empty and /dev/null is
+      # bound here, which nothing reads.
+      - ${OUSTER_MASK_HOST:-/dev/null}:/etc/ouster_driver/mask:ro
       # persisted sensor metadata (~/.ros/{hostname}_metadata.json) — survives restarts; rig GCs it
       # only on `rig down --purge`. The container runs as root, so ~ resolves to /root. `metadata` is
       # a static local alias for the per-instance external volume named below (compose does NOT
