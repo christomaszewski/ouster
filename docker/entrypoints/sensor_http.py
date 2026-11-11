@@ -1,12 +1,15 @@
 """Firmware-aware, non-persistent sensor mode changes (FW 2.3+)."""
 
 import json
-import math
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+SNAPSHOT_TIMEOUT = 3  # seconds for each of the two requests of a status/config read
+MODE_WAIT = {"NORMAL": 120, "STANDBY": 60}  # seconds for the sensor to reach a mode
 
 
 class SensorError(RuntimeError):
@@ -18,6 +21,10 @@ class SensorHTTP:
         self.base = f"http://{hostname}/api/v1/sensor"
         self.clock = clock
         self.sleep = sleep
+        # Set by the supervisor: on_info(info) for every sensor_info read, in order, and
+        # on_reinit() just before this client asks the sensor to reinitialize.
+        self.on_info = None
+        self.on_reinit = None
 
     def request(self, path, body=None, timeout=5):
         request = urllib.request.Request(
@@ -45,8 +52,10 @@ class SensorHTTP:
             raise SensorError(f"unrecognized sensor firmware: {info.get('build_rev')!r}")
         return tuple(map(int, match.groups()))
 
-    def snapshot(self, timeout=3):
+    def snapshot(self, timeout=SNAPSHOT_TIMEOUT):
         info = json.loads(self.request("/metadata/sensor_info", timeout=timeout))
+        if self.on_info is not None:
+            self.on_info(info)
         legacy = self.version(info) < (3, 1, 0)
         path = "/cmd/get_config_param?args=active" if legacy else "/config?staging=false"
         config = json.loads(self.request(path, timeout=timeout))
@@ -68,16 +77,6 @@ class SensorHTTP:
             raise SensorError("invalid sensor alerts response")
         return alerts
 
-    def temperature(self):
-        """Compatibility accessor; reporting uses telemetry() once for all measurements."""
-        telemetry = self.telemetry()
-        value = telemetry.get("internal_temperature_deg_c")
-        if value is None:
-            raise SensorError("internal temperature unavailable (requires Rev 06 or newer hardware)")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise SensorError("invalid internal_temperature_deg_c in sensor telemetry")
-        return float(value)
-
     @staticmethod
     def check_cancelled(stop_event):
         if stop_event is not None and stop_event.is_set():
@@ -93,7 +92,7 @@ class SensorHTTP:
         while self.clock() < deadline:
             self.check_cancelled(stop_event)
             try:
-                return self.snapshot(timeout=max(0.1, min(3, (deadline - self.clock()) / 2)))
+                return self.snapshot(timeout=max(0.1, min(SNAPSHOT_TIMEOUT, (deadline - self.clock()) / 2)))
             except Exception as error:
                 if not self.transient(error):
                     raise
@@ -102,8 +101,7 @@ class SensorHTTP:
 
     def ensure_mode(self, target, *, timeout=None, stop_event=None):
         expected = {"NORMAL": "RUNNING", "STANDBY": "STANDBY"}[target]
-        deadline = self.clock() + (timeout if timeout is not None else
-                                   (120 if target == "NORMAL" else 60))
+        deadline = self.clock() + (timeout if timeout is not None else MODE_WAIT[target])
 
         def write(path, body=None):
             self.check_cancelled(stop_event)
@@ -128,6 +126,8 @@ class SensorHTTP:
                     raise SensorError(f"sensor rejected staged config: {reply}")
             else:
                 write("/config?staging=true&reinit=false&persist=false", config)
+            if self.on_reinit is not None:
+                self.on_reinit()
             try:
                 if legacy:
                     write("/cmd/reinitialize")

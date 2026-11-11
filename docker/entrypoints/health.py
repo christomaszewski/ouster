@@ -76,7 +76,10 @@ class HealthReporter:
         self.history_gap = False
         self.alert_generation = 0
         self.hardware_id = ""
-        self.sensor_epoch = None
+        self.sensor_epoch = None  # latest (prod_sn, initialization_id)
+        self.alert_epoch = None   # the one the alert log's cursors have been counted under
+        self.resets = 0           # identity changes the supervisor did not cause, as last told
+        self.reinitialized = False
         self.temperature_supported = None
         self.packet_at = None
         self.packet_count = 0
@@ -93,15 +96,31 @@ class HealthReporter:
         with self.lock:
             self.failures[group] = str(error)
 
-    def identify(self, info):
+    def identify(self, info, resets=None):
+        """Note the sensor's identity. initialization_id changes on every reinitialization, and
+        the supervisor reinitializes the sensor on each of its own mode changes; `resets` is its
+        count of the changes it did not cause (a reboot, a power cycle, another client). Only
+        those break the alert history outright. After one of its own, the next valid alerts
+        reply shows whether the log carried on. Without `resets`, every change counts."""
         with self.lock:
             self.hardware_id = " ".join(str(info[k]) for k in ("prod_line", "prod_sn") if info.get(k))
             epoch = (info.get("prod_sn"), info.get("initialization_id"))
-            if self.sensor_epoch is not None and epoch != self.sensor_epoch:
+            first = self.sensor_epoch is None
+            changed = not first and epoch != self.sensor_epoch
+            unexplained = changed if resets is None else not first and resets != self.resets
+            if unexplained:
                 self.next_cursor = None
                 self.history_gap = True
                 self.alert_generation += 1
+                self.alert_epoch = epoch
+                self.reinitialized = False
+            elif changed:
+                self.reinitialized = True
+            if self.alert_epoch is None:
+                self.alert_epoch = epoch
             self.sensor_epoch = epoch
+            if resets is not None:
+                self.resets = resets
             # Older part numbers also use alphabetic revisions. Do not guess those.
             revision = str(info.get("prod_pn", "")).rsplit("-", 1)[-1] if "-" in str(info.get("prod_pn", "")) else ""
             self.temperature_supported = int(revision) >= 6 if revision.isdigit() else None
@@ -155,10 +174,19 @@ class HealthReporter:
         with self.lock:
             cursors = [e["cursor"] for e in events if isinstance(e.get("cursor"), int)]
             if self.next_cursor is not None and cursor is not None:
-                if cursor < self.next_cursor or cursors and min(cursors) > self.next_cursor:
-                    self.history_gap = True
-                if cursor < self.next_cursor:
+                # A cursor below the last one: the log counts from zero again, so its cursors
+                # get a new scope (alerts.epoch). That is lost history unless a reinitialization
+                # by the supervisor explains it; polling pauses during a mode change, so events
+                # logged inside one are not followed either way. This reply has to begin at
+                # event zero after a restart, otherwise at the event after the last reply.
+                restarted = cursor < self.next_cursor
+                if restarted:
                     self.alert_generation += 1
+                    self.alert_epoch = self.sensor_epoch
+                if restarted and not self.reinitialized or \
+                        cursors and min(cursors) > (0 if restarted else self.next_cursor):
+                    self.history_gap = True
+            self.reinitialized = False
             self.next_cursor = cursor
             current = {a["id"] for a in active}
             for a in events + active:
@@ -180,7 +208,7 @@ class HealthReporter:
             reports.insert(0, status("sensor alerts", worst,
                 f"{len(current)} active alert(s)", {"alerts.active": len(current), "alerts.history_gap": self.history_gap,
                 "alerts.log": json.dumps(events[-32:], separators=(",", ":")),
-                "alerts.epoch": f"{self.sensor_epoch}/{self.alert_generation}"}))
+                "alerts.epoch": f"{self.alert_epoch}/{self.alert_generation}"}))
             self.record("sensor alerts", reports)
 
     def packet_seen(self):

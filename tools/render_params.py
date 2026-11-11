@@ -18,21 +18,26 @@ is OPAQUE -- copied verbatim into ros__parameters -- while the `connection` bloc
 upstream's flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). The
 optional `zenoh:` block never reaches the params doc: it is validated here, rendered to ONE
 ZENOH_CONFIG_OVERRIDE pair string, and emitted (`--env` mode) for the entrypoint's in-container
-export. Used by `ouster-up`:
+export. The optional `mask:` block names an image file on the HOST; the launcher mounts it at
+MASK_CONTAINER_PATH and the params doc points the driver's `mask_path` there. Used by `ouster-up`:
 
   render_params.py <config.yaml>          # -> the ROS 2 params YAML on stdout
   render_params.py --env <config.yaml>    # -> identity, startup/shutdown state, Zenoh env lines
+  render_params.py --mask <config.yaml>   # -> the mask file found for `mask.path`, and its hash
 
 The params doc is keyed by the `/**` wildcard node so it binds regardless of the namespace rig
 pushes via `ouster_ns`. (Upstream's own driver_params.yaml keys the explicit node path
 `ouster/os_driver`, which would NOT match a custom namespace -- so do NOT copy that keying.)
 Needs PyYAML on the host (apt: python3-yaml).
 """
+import hashlib
 import json
 import math
+import os
 import re
 import shlex
 import sys
+from pathlib import Path
 
 try:
     import yaml
@@ -53,6 +58,78 @@ def require_ident(what: str, value: str) -> str:
             "(it becomes a compose project / ROS namespace / file name)\n")
         sys.exit(2)
     return value
+
+
+# Where the launcher mounts the image named by `mask.path` (docker/compose/compose.deploy.yaml).
+MASK_CONTAINER_PATH = "/etc/ouster_driver/mask"
+MASK_MAX_BYTES = 64 * 1024 * 1024
+# What the pinned driver decodes. TGA has no signature, so it is accepted by name.
+MASK_FORMATS = "PNG, JPEG, BMP, GIF, TIFF, binary PGM/PPM, or TGA named *.tga"
+_MASK_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8", b"BM", b"GIF8", b"II*\x00", b"MM\x00*", b"II+\x00",
+                    b"MM\x00+", b"P5", b"P6")
+
+
+def mask_setting(cfg: dict, strict: bool) -> str:
+    """The host path in the OPTIONAL top-level `mask:` block ("" when there is none).
+
+    `strict` rejects a malformed block. The --env pass is not strict: it runs for every verb, and
+    a config with a broken mask block must still be inspectable and removable; `up` fails on it
+    in the params pass, before any container is touched.
+    """
+    mask = cfg.get("mask")
+    if mask is None:  # absent, or a bare `mask:` whose entries are all commented out
+        return ""
+    problem = None
+    if not isinstance(mask, dict):
+        problem = "`mask:` must be a mapping with a `path`"
+    elif set(mask) - {"path"}:
+        problem = f"unknown mask key(s): {', '.join(sorted(set(mask) - {'path'}))} (supported: path)"
+    elif not isinstance(mask.get("path"), str) or not mask["path"].strip():
+        problem = "mask.path must name an image file on this host"
+    if problem is None:
+        return mask["path"].strip()
+    if strict:
+        sys.stderr.write(f"render_params: {problem}\n")
+        sys.exit(2)
+    return ""
+
+
+def find_mask(config_path: str, wanted: str) -> Path:
+    """The file `mask.path` names. An absolute path is taken as written. A relative one is looked
+    for in the config file's directory and then in each directory above it, nearest first: rig
+    hands the launcher either the config itself or a copy it rendered under the deployment's
+    var/rendered/, and a path written from the deployment root is found from both."""
+    path = Path(wanted)
+    if path.is_absolute():
+        places, where = [path], "that path"
+    else:
+        base = Path(os.path.abspath(config_path)).parent
+        places = [folder / path for folder in (base, *base.parents)]
+        where = f"{base} or any directory above it"
+    for place in places:
+        if place.is_file():
+            return place
+    sys.stderr.write(f"render_params: mask.path {wanted!r}: no such file at {where}\n")
+    sys.exit(2)
+
+
+def check_mask(path: Path) -> str:
+    """Refuse a file the driver could only fail on, before a container is started for it. Returns
+    the content hash the launcher names its copy by."""
+    size = path.stat().st_size
+    problem = None
+    if size == 0:
+        problem = "is empty"
+    elif size > MASK_MAX_BYTES:
+        problem = f"is larger than {MASK_MAX_BYTES // (1024 * 1024)} MiB"
+    else:
+        data = path.read_bytes()
+        if not data.startswith(_MASK_SIGNATURES) and not path.name.lower().endswith(".tga"):
+            problem = f"is not an image the driver reads ({MASK_FORMATS})"
+    if problem:
+        sys.stderr.write(f"render_params: mask file {path} {problem}\n")
+        sys.exit(2)
+    return hashlib.sha256(data).hexdigest()
 
 
 def _pick(block: dict, out: dict, key: str, src_key: str, cast) -> None:
@@ -152,14 +229,24 @@ def derive_zenoh(zenoh) -> tuple:
 def main() -> int:
     args = sys.argv[1:]
     env_mode = bool(args and args[0] == "--env")
-    if env_mode:
+    mask_mode = bool(args and args[0] == "--mask")
+    if env_mode or mask_mode:
         args = args[1:]
     if len(args) != 1:
-        sys.stderr.write("usage: render_params.py [--env] <sensor-config.yaml>\n")
+        sys.stderr.write("usage: render_params.py [--env|--mask] <sensor-config.yaml>\n")
         return 2
 
     with open(args[0]) as handle:
         cfg = yaml.safe_load(handle) or {}
+
+    if mask_mode:
+        wanted = mask_setting(cfg, strict=True)
+        if not wanted:
+            return 0
+        source = find_mask(args[0], wanted)
+        print("MASK_SOURCE=" + shlex.quote(str(source)))
+        print("MASK_HASH=" + check_mask(source))
+        return 0
 
     service = require_ident("service", str(cfg.get("service") or "ouster"))
     name = require_ident("name", str(cfg.get("name") or "ouster"))
@@ -223,7 +310,8 @@ def main() -> int:
                  f"INITIAL_STATE={initial_state}",
                  f"SHUTDOWN_STATE={shutdown_state}",
                  "HEALTH_CONFIG=" + shlex.quote(json.dumps(health, allow_nan=False)),
-                 "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs)]
+                 "ZENOH_OVERRIDE=" + shlex.quote(zenoh_pairs),
+                 "MASK=" + shlex.quote(mask_setting(cfg, strict=False))]
         print("\n".join(lines))
         return 0
 
@@ -233,6 +321,15 @@ def main() -> int:
     merged.update(derive_connection(connection))
     for key, value in (cfg.get("driver_params") or {}).items():
         merged[key] = value
+    # A host mask image is mounted at one fixed path; point the driver at it. The driver's own
+    # mask_path stays available for a file that is already inside the container.
+    if mask_setting(cfg, strict=True):
+        if merged.get("mask_path") not in (None, ""):
+            sys.stderr.write("render_params: set either mask.path (an image on the host, mounted "
+                             "for you) or driver_params.mask_path (a path inside the container), "
+                             "not both\n")
+            return 2
+        merged["mask_path"] = MASK_CONTAINER_PATH
     if merged.get("operating_mode") not in (None, "", "NORMAL"):
         sys.stderr.write("render_params: omit driver_params.operating_mode or use NORMAL; "
                          "select standby with initial_state instead\n")

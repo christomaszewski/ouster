@@ -120,7 +120,7 @@ for relative in find_packages(str(root)):
 PY
 
 # Copy only manifests into the dependency stage: a source pin change with identical
-# dependencies must not reinstall the large PCL/OpenCV build toolchain.
+# dependencies must not reinstall the large PCL build toolchain.
 FROM toolchain AS build-deps
 COPY --from=sources /workspace/deps /workspace/deps
 RUN --mount=type=cache,id=ouster-apt-${ROS_DISTRO}-${TARGETARCH},target=/var/cache/apt/archives,sharing=locked \
@@ -167,6 +167,14 @@ RUN --mount=type=cache,id=ouster-ccache-${ROS_DISTRO}-${TARGETARCH},target=/root
  && ccache --show-stats
 # Record the actual compiler environment, including deps absent from the parent. The final
 # stage compares all overlapping ROS packages, catching stale independently cached apt layers.
+# ROS packages only, on purpose. The apt steps above also move a few non-ROS packages past the
+# parent (perl-base, ca-certificates and libpcre2-8-0 when this was written): the tools they
+# install depend on newer versions, and APT::Get::Upgrade "false" only keeps packages named on
+# the command line where they are. None of that reaches the runtime stage. What the runtime
+# needs from non-ROS libraries is that every shipped binary resolves and loads against its own
+# copies, which the ldd gate and the eager-load check there establish. Requiring equal versions
+# as well would fail this build every time Ubuntu updates such a package before the parent
+# image is refreshed.
 RUN dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Status}\n' 'ros-*' \
       | awk '$3 == "installed" {print $1 "\t" $2}' > /workspace/build-ros-packages.tsv
 
@@ -217,20 +225,15 @@ COPY --from=sources /workspace/src/ouster-ros/ouster-sensor-msgs/package.xml /tm
 # Wrapper deps and upstream manifest gaps (see the file's header):
 # rides the same rosdep pass as the upstream manifests, so nothing is hand-pinned to a soname.
 COPY docker/runtime_extra_deps/package.xml /tmp/deps/ouster_wrapper_runtime_deps/package.xml
-# pcl_conversions and cv_bridge are skipped: the driver uses both HEADER-ONLY — the shipped .so's
-# link no libpcl* and no libcv_bridge (the ldd gate below is the proof) — yet their debs
-# hard-depend on libpcl-dev/libopencv-dev, dragging ~5 GB of toolchain (gcc/gfortran), VTK, Java
-# and Boost -dev into an exec-only image. The three OpenCV runtime libs the driver DOES link
-# (core/imgcodecs/imgproc) are derived from cv_bridge's own deb metadata below, so the sonames
-# stay distro-maintained, never hand-pinned here. If a future pin starts linking either library
-# for real, the ldd gate fails the build and this carve-out must be revisited.
+# pcl_conversions is skipped: the driver uses it HEADER-ONLY — the shipped .so's link no libpcl*
+# (the ldd gate below is the proof) — yet its deb hard-depends on libpcl-dev, dragging ~5 GB of
+# toolchain (gcc/gfortran), VTK, Java and Boost -dev into an exec-only image. If a future pin
+# starts linking it for real, the ldd gate fails the build and this carve-out must be revisited.
+# No OpenCV is installed: the pinned driver decodes its optional mask image itself.
 RUN apt-get update \
  && rosdep update --rosdistro "${ROS_DISTRO}" \
  && rosdep install --from-paths /tmp/deps --ignore-src -y --rosdistro "${ROS_DISTRO}" \
-      --dependency-types=exec --skip-keys "pcl_conversions cv_bridge" \
- && apt-get install -y --no-install-recommends \
-      $(apt-cache depends --no-recommends "ros-${ROS_DISTRO}-cv-bridge" \
-        | awk '/Depends:/{print $2}' | grep '^libopencv-' | grep -v -- '-dev$') \
+      --dependency-types=exec --skip-keys "pcl_conversions" \
  && rm -rf /tmp/deps /var/lib/apt/lists/* /root/.ros
 
 COPY --from=build /workspace/install /opt/ouster_driver
@@ -264,7 +267,7 @@ RUN source "/opt/ros/${ROS_DISTRO}/setup.bash" \
 COPY docker/entrypoints/ros-entrypoint.sh /usr/local/bin/ros-entrypoint.sh
 COPY docker/entrypoints/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY docker/entrypoints/statectl.sh /usr/local/bin/statectl.sh
-COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/temperature.py docker/entrypoints/health.py docker/entrypoints/health_ros.py docker/entrypoints/lifecycle_ros.py /usr/local/bin/
+COPY docker/entrypoints/operational_state.py docker/entrypoints/sensor_http.py docker/entrypoints/health.py docker/entrypoints/health_ros.py docker/entrypoints/lifecycle_ros.py /usr/local/bin/
 RUN chmod +x /usr/local/bin/ros-entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/statectl.sh
 
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8

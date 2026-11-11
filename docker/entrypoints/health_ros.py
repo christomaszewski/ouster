@@ -107,9 +107,9 @@ def health_monitor(controller, namespace, params, stop_event, changing):
         node.create_timer(reporter.settings["interval_s"], heartbeat)
 
         def collect():
-            info = controller.sensor_info
+            info, resets = controller.sensor_seen
             if info:
-                reporter.identify(info)
+                reporter.identify(info, resets)
             value = reporter.collect(controller.sensor, changing)
             if value is not None and not changing.is_set() and not stop_event.is_set():
                 message = Temperature()

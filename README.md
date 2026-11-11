@@ -33,21 +33,32 @@ state, sensor operating mode/status, and driver state; it does not measure data 
 
 ```
 ouster/
-├── ouster.repos              # upstream pin (vcstool)
+├── ouster.repos              # ROS driver pin: our fork, full commit SHA
 ├── ouster-sdk.repos          # explicit SDK override (full commit SHA)
 ├── rigging.yaml              # rig descriptor
 ├── ouster-up                 # rig launcher (networked; no serial branch)
 ├── sensors/ouster.example.yaml
 ├── tools/
 │   ├── render_params.py      # generic rig config -> ouster driver_params.yaml
-│   └── build_image.sh        # rig build phase: build + push runtime image
+│   ├── fetch_upstream.py     # fetch both pins (or take rig's exports), record what was built
+│   ├── runtime_images.py     # launcher helper: the compose model's images and rig's digest pins
+│   ├── build_image.sh        # rig build phase: build + push runtime image
+│   ├── rig-build.sh          # rig build contract helper sourced by build_image.sh
+│   ├── test_build_contract.py  # build_image.sh's docker arguments, checked without a daemon
+│   └── test_upstream.sh      # upstream regressions (the Dockerfile's upstream-tests target)
 ├── docker/
-│   ├── Dockerfile.runtime    # multi-stage: vcs import + rosdep + colcon (Release)
-│   ├── Dockerfile.dev
+│   ├── Dockerfile.runtime    # multi-stage: fetch_upstream.py + rosdep + colcon (Release)
+│   ├── Dockerfile.dev        # dev toolchain; .devcontainer.json mirrors it
+│   ├── check_runtime.py      # image-build gate: build/runtime ROS packages agree, libraries load
+│   ├── ament_target_dependencies_compat.cmake  # Lyrical shim for upstream's CMake
+│   ├── runtime_extra_deps/package.xml          # exec deps upstream's manifests leave out
 │   ├── entrypoints/{ros-entrypoint,healthcheck,statectl}.sh
-│   ├── entrypoints/{operational_state,sensor_http}.py
+│   ├── entrypoints/{operational_state,sensor_http}.py   # supervisor and its sensor HTTP client
+│   ├── entrypoints/{health,health_ros,lifecycle_ros}.py # diagnostics, the health node, lifecycle calls
 │   └── compose/{compose.deploy,compose.dev,compose.replay}.yaml
-└── src/                      # GITIGNORED — upstream fetched here by `vcs import` / the build
+├── docs/SERVICE_HEALTH.md    # sensor and service health specification shared with the dashboard
+├── tests/                    # python3 -m unittest discover -s tests (ROS parts run in the image)
+└── src/                      # GITIGNORED — upstream fetched here by tools/fetch_upstream.py
 ```
 
 ## Quick start (local dev, no rig)
@@ -145,6 +156,19 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   connection keys here — they come from the `connection` block.
 - `shutdown_state: standby` (default) — physically park on container shutdown;
   `unchanged` stops the driver without changing the sensor's operating mode.
+- `mask.path` (optional) — an image on the host whose black pixels blank the measurements at
+  the same position of every scan. PNG, JPEG, BMP, GIF, TIFF and binary PGM/PPM are accepted,
+  and TGA when the file is named `*.tga`. An absolute path is taken as written; a
+  relative one is looked for in the config file's directory and then in each directory above
+  it, nearest first, so `config/sensors/front-mask.png` written from the deployment root is
+  found both from the config itself and from the copy rig renders under `var/rendered/`. A
+  mask kept in the deployment's `config/` folder travels with a baked artifact. The launcher
+  copies the file to `var/run/<name>.<content hash>.mask`, mounts that copy read-only at
+  `/etc/ouster_driver/mask` and sets the driver's `mask_path` to it, so a redrawn mask selects a
+  new mount at the next `up` and editing the original never changes what a running driver
+  reads. `up` and `config` fail, before any container is created, when the file is missing,
+  empty or not one of those formats. `driver_params.mask_path` still names a file already
+  inside the container; setting both is an error.
 
 ### Temperature and thermal status
 
@@ -166,7 +190,8 @@ ros2 topic echo /top/temperature sensor_msgs/msg/Temperature
 **Hardware limit:** the [FW 2.4 manual, §13.4.3 (p. 126)](https://data.ouster.io/downloads/software-user-manual/firmware-user-manual-v2.4.0.pdf)
 documents internal temperature for **Rev 06 and newer** sensors only. A Rev 4/5 OS1 therefore
 cannot be assumed to provide readings. Missing/null/invalid values or HTTP failures skip the
-sample and log a warning at most once per minute; polling continues without affecting the
+sample, and the `temperature` component on `/diagnostics` says why (`measurement unavailable`,
+or `health.error` while the request is failing); polling continues without affecting the
 operational state. No zero or previous reading is substituted. `sensor_msgs` is a standard ROS
 interface, so recording this topic needs no additional fleet message package.
 
@@ -200,10 +225,36 @@ A running container has two operational states, managed through the launcher:
 - **`state`** prints machine JSON on stdout (`active` | `standby` | `transitioning` | `down`).
   Its detail includes the target, lifecycle state, and sensor mode/status. A mismatch or
   unreachable sensor is `transitioning` and unhealthy, including after a partial failure.
+  It exits 0 with one JSON object whatever the project is doing. When a container is running
+  but its supervisor does not answer (starting, stopping or hung), the launcher answers
+  `{"state": "transitioning", "detail": "supervisor unreachable"}`; read it next to the
+  container health, which asks the same socket. A listed container that is not running, for
+  example one in a restart loop, is `down` with `container <status>` as its detail.
 - Requests are serialized and idempotent. If another transition remains busy for 20 seconds,
   the command fails with an explicit retry message. A failed accepted request retains its
   target; the supervisor retries recovery every five seconds. The healthcheck and `state`
   are read-only. Sensor mode writes never intentionally persist config to flash.
+- `standby` and `activate` wait up to 372 seconds for the supervisor's reply. That is 30
+  seconds more than the slowest request the supervisor still answers, an activation that uses
+  every budget and then fails: 20 waiting for a transition in progress, 37 observing, 31
+  stopping the old driver, 120 for the sensor to reach NORMAL, 103 for the driver to become
+  active, and 31 stopping it again. A success that uses every budget answers after about 308
+  seconds; with the previous 300-second wait the client could report it as a timeout. The
+  numbers are named constants in `operational_state.py`, and the wait is derived from them.
+  For scale, on an OS-0-128 (firmware 2.5.3) and a Jetson Orin a change to standby took about
+  10 seconds, a change to active 35 to 38, and `up` from a parked sensor about 43.
+- Each five-second observation is two sensor HTTP requests and one lifecycle request. While the
+  target is `active` and the driver process is alive, an observation that gets no answer (one
+  of those requests timing out or failing in transit) is repeated twice, two seconds apart,
+  before the driver is stopped, so one lost reply does not cost a driver restart. An answer
+  that contradicts the target, or a driver process that exited, starts recovery at once.
+  Nothing is written to the sensor while the supervisor is asking again. On an OS-0-128
+  (firmware 2.5.3) driven from a Jetson Orin, a driver process frozen for 8 seconds was asked
+  again once and left running, and one frozen for good was replaced and active again 43 seconds
+  after it stopped answering, about 14 of them spent asking again. No observation went
+  unanswered on its own in a 16-minute run there, nor in ten minutes with all twelve cores of
+  the Orin kept busy, so how often the repeats (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) are needed
+  in the field is still unmeasured.
 
 Firmware below 3.1 (including 2.4) uses the legacy config commands followed by `reinitialize`;
 newer firmware uses explicit nonpersistent staging. Temporary HTTP failures during spin-up
@@ -216,6 +267,9 @@ for a new container. Standby startup does not launch the driver or briefly wake 
 Both foreground `up` and `up -d` support standby. Detached `up -d` additionally waits for the
 requested state, including when reusing an existing container. Its default budget is 300 seconds
 (`OUSTER_SETTLE_TIMEOUT`; the older `OUSTER_STANDBY_SETTLE_TIMEOUT` also remains accepted).
+The budget is judged against a fresh state probe: a transition request that is still running
+when it ends is allowed to finish, and counts as a success if the instance then reports the
+requested state.
 
 Runtime requests are saved in `/var/lib/ouster/target-state` inside the container, so a Docker
 restart retains the latest request. Recreating the container uses the configured initial state.
@@ -269,6 +323,10 @@ Regression tests run with `python3 -m unittest discover -s tests -v`. Before fie
 validate on the OS1-64/FW 2.4: boot with persisted standby, activate, repeat standby/activate,
 restart the container while parked, and power-cycle the sensor while parked. Check both reported
 state and sensor status; mock tests do not replace this hardware check.
+
+The stream sampling test (`tests/test_health_stream_ros.py`) runs in the image under its
+default RMW and again under `rmw_zenoh_cpp`, the RMW deployments use, through a router it starts
+on a loopback port of its own.
 
 The runtime integration test uses real ROS lifecycle services when ROS is installed and verifies
 deactivate/cleanup after SIGTERM without any lifecycle CLI calls. An isolated Orin/Zenoh benchmark
@@ -332,6 +390,18 @@ compatible with this ROS driver. An SDK-only update does not change
 `ouster_sensor_msgs`, so leave the two ROS source references matched to each other.
 The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/ouster-lidar/ouster-sdk/pull/727).
 
+The fork reads the optional mask image (`mask_path`) with a bundled single-header decoder
+instead of OpenCV, which the driver used for nothing else, so neither the build nor the runtime
+image installs OpenCV. PNG, JPEG, BMP, GIF, TGA and binary PGM/PPM masks are decoded by that
+bundled decoder and TIFF by libtiff, which the image gets through the fork's manifest. PSD is
+refused although the decoder knows it: it reads only RGB-mode files, so the usual grayscale
+mask would fail, and it changes semi-transparent pixels. WebP and the rarer formats only
+OpenCV could read are refused with a load error that lists the
+supported formats; when such a file reaches the driver through `driver_params.mask_path`, the
+service reports `transitioning` while the driver keeps failing to start (the launcher catches
+it earlier for `mask.path`). The fork's tests decode each format and fit a mask to the scan;
+the regression target runs them. Keep this patch until upstream no longer needs OpenCV.
+
 Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to
 replace an existing `src/ouster-ros`; preserve any local work and select a fresh source directory
 when changing pins. Running `vcs import` against only `ouster.repos` omits the SDK override.
@@ -387,6 +457,25 @@ and 39% and sampling costs 5% and 9%: that middleware still receives every messa
 process, which only dropping the subscription would avoid. `packets.received` therefore counts
 heartbeats that found a new packet, not packets, and a stopped stream is reported one heartbeat
 later at most.
+
+`alerts.history_gap` turns true when alert history may have been lost, and stays true until the
+supervisor restarts: the sensor's identity changed outside a mode change (a reboot, a power
+cycle, another client reinitializing it, or the running driver resetting the sensor on its own,
+as it does after sustained packet errors and for its `reset` and `set_config` services), the
+alert cursor went backwards, or events were skipped between two polls. The supervisor's own mode
+changes are not such a loss. Each one reinitializes the sensor and changes its
+`initialization_id`, as does the driver when it applies a different config while it is being
+activated; the supervisor knows which reinitializations belong to its transitions and reports
+only the others to the health reporter. After one of its own, a cursor that carried on is
+checked for skipped events as usual and keeps its `alerts.epoch`; a cursor that started again
+from zero gets a new `alerts.epoch` without a gap. Polling pauses during a mode change, so
+alerts the sensor logs inside one are not followed. Seen on an OS-0-128 with firmware 2.5.3:
+`initialization_id` rises on every reinitialization (by two for a change to standby, by one for
+a change to normal, an outside `reinitialize` or the driver's own `reset` service), and the
+alert cursor carries on across all of them, so a reinitialization by itself lost no alert history
+there. The flag stayed false through the supervisor's own mode changes and turned true after the
+outside `reinitialize` and after the `reset` service. A reboot or power cycle was not tried; this
+firmware has no restart command over HTTP.
 
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,

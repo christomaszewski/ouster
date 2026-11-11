@@ -1,5 +1,5 @@
 # Backward-compatibility shim for `ament_target_dependencies`, which ROS 2 Lyrical removed from
-# ament_cmake. Upstream ouster-ros (0.14.2 and current HEAD) still calls it, so it fails to configure
+# ament_cmake. Upstream ouster-ros (through 0.15.1, the current pin) still calls it, so it fails to configure
 # on Lyrical with: Unknown CMake command "ament_target_dependencies".
 #
 # We inject this file via `-DCMAKE_PROJECT_ouster_ros_INCLUDE=` in docker/Dockerfile.runtime, so it is

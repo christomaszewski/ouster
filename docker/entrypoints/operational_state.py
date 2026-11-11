@@ -21,13 +21,39 @@ import time
 
 import yaml
 
-from sensor_http import SensorHTTP
+from sensor_http import MODE_WAIT, SNAPSHOT_TIMEOUT, SensorHTTP
 from health_ros import health_monitor
+from lifecycle_ros import REQUEST_TIMEOUT as LIFECYCLE_TIMEOUT
 
 LOG = logging.getLogger("ouster-state")
 SOCKET = os.environ.get("OUSTER_STATE_SOCKET", "/run/ouster/state.sock")
 TARGET_FILE = os.environ.get("OUSTER_TARGET_FILE", "/var/lib/ouster/target-state")
 PARAMS_FILE = os.environ.get("OUSTER_PARAMS_FILE", "/etc/ouster_driver/params.yaml")
+
+# An active driver is stopped only after this many further observations, this many seconds apart,
+# have also gone unanswered. Not yet confirmed on hardware: see Controller.confirmed.
+PROBE_RETRIES = 2
+PROBE_RETRY_PAUSE = 2
+
+# Failure budgets in seconds: ceilings, not delays.
+LOCK_WAIT = 20        # a request waits this long behind an observation or transition in progress
+ACTIVATION_WAIT = 90  # a started driver has this long to report active
+ACTIVATION_POLL = 2
+STOP_SIGNALS = ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 4))
+OBSERVE_BUDGET = 2 * SNAPSHOT_TIMEOUT + LIFECYCLE_TIMEOUT  # both sensor requests, then the lifecycle one
+STOP_BUDGET = 3 * LIFECYCLE_TIMEOUT + sum(budget for _, budget in STOP_SIGNALS)  # state, deactivate, cleanup; signals
+# The slowest standby/activate request the supervisor still answers is an activate. In order: the
+# lock, the first observation and its repeats, stopping the old driver, waking the sensor, driver
+# activation with an observation and a pause in flight when its deadline passes, and stopping the
+# driver again because it did not become active. (A success confirms with one observation
+# instead; standby parks in MODE_WAIT["STANDBY"] and starts nothing.)
+TRANSITION_BUDGET = (LOCK_WAIT + OBSERVE_BUDGET + PROBE_RETRIES * (PROBE_RETRY_PAUSE + OBSERVE_BUDGET)
+                     + STOP_BUDGET + MODE_WAIT["NORMAL"]
+                     + ACTIVATION_WAIT + OBSERVE_BUDGET + ACTIVATION_POLL + STOP_BUDGET)
+# The client waits longer than that. With the same wait on both sides, a slow activation that
+# succeeded could be reported as a timeout. tests/test_operational_state.py replays the slowest
+# paths against these numbers.
+COMMAND_TIMEOUT = TRANSITION_BUDGET + 30
 
 
 class Driver:
@@ -53,7 +79,7 @@ class Driver:
         try:
             result = subprocess.run(
                 ["ros2", "lifecycle", "get", self.node], capture_output=True,
-                text=True, timeout=5, check=True,
+                text=True, timeout=LIFECYCLE_TIMEOUT, check=True,
             )
             # Zenoh can emit ANSI-colored watchdog warnings on stdout before or after
             # the CLI response. Only accept the lifecycle response's complete line.
@@ -89,7 +115,7 @@ class Driver:
                     else:
                         subprocess.run(
                             ["ros2", "lifecycle", "set", self.node, transition],
-                            capture_output=True, text=True, timeout=5, check=True,
+                            capture_output=True, text=True, timeout=LIFECYCLE_TIMEOUT, check=True,
                         )
                 LOG.info("driver lifecycle drain (%s) finished in %.2fs", state,
                          time.monotonic() - started)
@@ -98,7 +124,7 @@ class Driver:
         # Kill/wait for the entire launch process group, even if its leader has
         # already exited. No upstream config writer may survive into standby.
         pgid = self.process.pid
-        for sig, budget in ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 4)):
+        for sig, budget in STOP_SIGNALS:
             if sig != signal.SIGINT:
                 LOG.warning("driver process group still running; sending %s", sig.name)
             try:
@@ -137,8 +163,14 @@ class Controller:
         self.lock = threading.Lock()
         self.changing = threading.Event()
         self.error = ""
-        self.sensor_info = {}
         self.observation = {"state": "unknown", "detail": "waiting for observation", "at": self.clock()}
+        # The sensor's identity as the health reporter needs it: the latest sensor_info, and how
+        # often that identity changed without this supervisor having asked for it (see `see`).
+        self.sensor_seen = ({}, 0)
+        self.sensor_epoch = None
+        self.reinit_expected = False
+        self.identity_lock = threading.Lock()
+        sensor.on_info, sensor.on_reinit = self.see, self.expect_reinit
 
     def health_state(self):
         # Atomic dict replacement; never wait on transition locks or HTTP here.
@@ -185,19 +217,79 @@ class Controller:
         if self.stop_event.wait(seconds):
             raise RuntimeError("supervisor stopping")
 
-    def observe(self):
+    def see(self, info):
+        """Record one sensor_info read. The sensor client reports every read it makes, in order.
+
+        (prod_sn, initialization_id) changes whenever the sensor reinitializes: on a reboot or
+        power cycle, and on every mode change this supervisor makes. The health reporter must
+        tell the two apart, because only the first can lose alert history. A change is counted
+        as a reset unless a reinitialization from here is outstanding: this supervisor's own
+        mode write, or the driver it started applying its config. The pair is replaced as one
+        object, so a reader never sees a new identity with an old count."""
+        epoch = (info.get("prod_sn"), info.get("initialization_id"))
+        with self.identity_lock:
+            resets = self.sensor_seen[1]
+            if self.sensor_epoch not in (None, epoch) and not self.reinit_expected:
+                resets += 1
+            self.sensor_epoch = epoch
+            self.sensor_seen = (info, resets)
+
+    def expect_reinit(self):
+        with self.identity_lock:
+            self.reinit_expected = True
+
+    def survey(self):
+        """Read both layers once. Returns the observation, and whether the only thing between it
+        and an active target is a lifecycle request that got no reply: the sensor answered and
+        is running, so nothing that did answer contradicts the target."""
         info, config = self.sensor.snapshot()
+        self.see(info)  # before the slower lifecycle request: identities are recorded in read order
         lifecycle = self.driver.lifecycle()
         mode, status = config["operating_mode"], info.get("status", "unknown")
+        running = mode == "NORMAL" and status == "RUNNING"
         state = "transitioning"
         if self.target == "standby" and self.driver.process is None and mode == "STANDBY" and status == "STANDBY":
             state = "standby"
-        elif self.target == "active" and lifecycle == "active" and mode == "NORMAL" and status == "RUNNING":
+        elif self.target == "active" and lifecycle == "active" and running:
             state = "active"
         detail = f"target:{self.target}; lifecycle:{lifecycle}; sensor:{mode}/{status}"
-        self.sensor_info = info
         self.observation = {"state": state, "detail": detail, "at": self.clock()}
-        return {"state": state, "detail": detail}
+        unanswered = self.target == "active" and running and lifecycle == "unreachable"
+        return {"state": state, "detail": detail}, unanswered
+
+    def observe(self):
+        return self.survey()[0]
+
+    def confirmed(self):
+        """Whether the target state is in effect, asking again while a probe goes unanswered.
+
+        An observation is two sensor HTTP requests and one lifecycle request, repeated every five
+        seconds. One of them timing out says nothing about a sensor that is delivering data, yet
+        acting on it stops the driver, asserts the sensor mode and starts the driver again: tens
+        of seconds without lidar data. So while the target is active and the driver process is
+        alive, an unanswered observation is repeated before anything is stopped.
+
+        Everything else is acted on at once, as before: a driver process that exited, a sensor
+        that answers with another mode or status, a lifecycle state other than active, an error
+        the sensor will repeat. Upstream's own recovery has to be stopped before this
+        supervisor's starts. The window is short for the same reason, and nothing is written to
+        the sensor while it is open."""
+        for attempt in range(PROBE_RETRIES + 1):
+            try:
+                result, unanswered = self.survey()
+                if result["state"] == self.target:
+                    if attempt:
+                        LOG.info("observation answered; driver left running")
+                    return True
+                reason = result["detail"]
+            except Exception as error:
+                unanswered, reason = SensorHTTP.transient(error), str(error)
+            retry = unanswered and self.target == "active" and self.driver.running()
+            if not retry or attempt == PROBE_RETRIES:
+                return False
+            LOG.warning("observation unanswered (%s); asking again before stopping the driver (%d of %d)",
+                        reason, attempt + 1, PROBE_RETRIES)
+            self.pause(PROBE_RETRY_PAUSE)
 
     def state(self):
         if self.changing.is_set():
@@ -215,11 +307,10 @@ class Controller:
     def reconcile(self):
         if self.stop_event.is_set():
             raise RuntimeError("supervisor stopping")
-        try:
-            if self.observe()["state"] == self.target:
-                return
-        except Exception:
-            pass  # stop upstream recovery before attempting sensor recovery
+        if self.confirmed():
+            self.reinit_expected = False  # whatever was asked of the sensor has been seen
+            return
+        # Stop upstream recovery before attempting sensor recovery.
         self.changing.set()
         self.driver.stop()
         if self.stop_event.is_set():
@@ -230,8 +321,9 @@ class Controller:
         if self.target == "active":
             if self.stop_event.is_set():
                 raise RuntimeError("supervisor stopping")
+            self.expect_reinit()  # the driver reinitializes the sensor if its config differs
             self.driver.start()
-            deadline = self.clock() + 90
+            deadline = self.clock() + ACTIVATION_WAIT
             try:
                 while self.clock() < deadline:
                     if not self.driver.running():
@@ -241,9 +333,9 @@ class Controller:
                             break
                     except Exception:
                         pass  # sensor may reinitialize when driver config is applied
-                    self.pause(2)
+                    self.pause(ACTIVATION_POLL)
                 else:
-                    raise RuntimeError("driver did not become active within 90 seconds")
+                    raise RuntimeError(f"driver did not become active within {ACTIVATION_WAIT} seconds")
             except Exception:
                 self.driver.stop()
                 raise
@@ -251,6 +343,7 @@ class Controller:
         result = self.observe()
         if result["state"] != self.target:
             raise RuntimeError(f"transition did not settle: {result['detail']}")
+        self.reinit_expected = False
         LOG.info("%s complete: %s", self.target, result["detail"])
 
     def transition(self, target=None):
@@ -258,7 +351,7 @@ class Controller:
             raise ValueError("target must be active or standby")
         # Allow a brief status probe to finish, but do not queue a command
         # indefinitely behind another transition.
-        if not self.lock.acquire(timeout=20 if target is not None else 0):
+        if not self.lock.acquire(timeout=LOCK_WAIT if target is not None else 0):
             raise RuntimeError("transition in progress; retry when state settles")
         try:
             if self.stop_event.is_set():
@@ -404,7 +497,7 @@ def serve(*, monitor=health_monitor):
 
 def client(command, *, output=True):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(300 if command in ("standby", "activate") else 15)
+        connection.settimeout(COMMAND_TIMEOUT if command in ("standby", "activate") else 15)
         connection.connect(SOCKET)
         connection.sendall((json.dumps({"command": command}) + "\n").encode())
         with connection.makefile("rb") as stream:

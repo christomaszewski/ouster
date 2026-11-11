@@ -64,10 +64,22 @@ class Firmware:
         self.initializing_modes = {"NORMAL", "STANDBY"}
         self.telemetry = {"internal_temperature_deg_c": 45}
         self.alerts = {"active": [], "log": [], "next_cursor": 0}
+        self.initialization_id = 7109744  # a new one for every reinitialization, as on the sensor
+        self.unreachable = 0
+
+    def reboot(self):
+        """A power cycle: boot defaults, a new initialization id, an alert log counted from zero."""
+        self.active = dict(self.persisted)
+        self.staged = dict(self.persisted)
+        self.initialization_id += 1
+        self.alerts = {"active": [], "log": [], "next_cursor": 0}
 
     def __call__(self, request, timeout=None):
         path = urllib.parse.urlsplit(request.full_url)
         self.calls.append((request.get_method(), path.path, path.query))
+        if self.unreachable:
+            self.unreachable -= 1
+            raise urllib.error.URLError("no route to host")
         if path.path.endswith("/telemetry"):
             return HTTPResponse(self.telemetry)
         if path.path.endswith("/alerts"):
@@ -77,7 +89,8 @@ class Firmware:
                 self.status_failures -= 1
                 raise urllib.error.HTTPError(request.full_url, 503, "initializing", {}, None)
             status = "RUNNING" if self.active["operating_mode"] == "NORMAL" else "STANDBY"
-            return HTTPResponse({"build_rev": self.version,
+            return HTTPResponse({"build_rev": self.version, "prod_line": "OS-1-64-U02",
+                                 "prod_sn": "992201000123", "initialization_id": self.initialization_id,
                                  "status": "INITIALIZING" if self.never_runs and
                                  self.active["operating_mode"] in self.initializing_modes else status})
         if path.path.endswith("/cmd/get_config_param"):
@@ -93,6 +106,7 @@ class Firmware:
             return HTTPResponse({})
         if path.path.endswith("/cmd/reinitialize") or "reinit=true" in path.query:
             self.active = dict(self.staged)
+            self.initialization_id += 1
             if self.lose_reinit_response:
                 raise urllib.error.URLError("connection reset after applying config")
             return HTTPResponse({})
@@ -204,12 +218,16 @@ class FakeDriver:
         self.events = events
         self.process = None
         self.lc = "unreachable"
+        self.lost_replies = 0
         self.stop_fails = False
 
     def running(self):
         return self.process is not None
 
     def lifecycle(self):
+        if self.running() and self.lost_replies:
+            self.lost_replies -= 1
+            return "unreachable"
         return self.lc if self.running() else "absent"
 
     def stop(self):
@@ -230,10 +248,15 @@ class FakeSensor:
         self.mode = "STANDBY"
         self.status = "STANDBY"
         self.fail = False
+        self.lost_replies = 0
+        self.lost_reply = TimeoutError("timed out")
 
     def snapshot(self):
         if self.fail:
             raise OSError("sensor disconnected")
+        if self.lost_replies:
+            self.lost_replies -= 1
+            raise self.lost_reply
         return {"status": self.status}, {"operating_mode": self.mode}
 
     def ensure_mode(self, mode, **_):
@@ -359,6 +382,101 @@ class ControllerTests(unittest.TestCase):
         self.controller.transition("active")
         self.assertEqual(self.events, [])
 
+    def active_and_watched(self):
+        """An active instance whose repeat pauses are recorded instead of slept."""
+        self.controller.transition("active")
+        self.events.clear()
+        self.pauses = []
+        self.controller.pause = self.pauses.append
+
+    def test_one_unanswered_sensor_request_leaves_an_active_driver_running(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.sensor.lost_replies = 1
+        with patch.object(operational, "PROBE_RETRY_PAUSE", 0.01), \
+                self.assertLogs("ouster-state", "WARNING") as logs:
+            self.controller.transition()  # the five-second loop's call
+        self.assertEqual(self.events, [])
+        self.assertIn("timed out", logs.output[0])
+        self.assertFalse(self.controller.changing.is_set())
+        self.assertEqual(self.controller.error, "")
+        self.assertEqual(self.controller.state()["state"], "active")
+
+    def test_one_unanswered_lifecycle_request_leaves_an_active_driver_running(self):
+        self.active_and_watched()
+        self.driver.lost_replies = 1
+        with self.assertLogs("ouster-state", "WARNING") as logs:
+            self.controller.transition()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.pauses, [operational.PROBE_RETRY_PAUSE])
+        self.assertIn("lifecycle:unreachable", logs.output[0])
+
+    def test_repeated_activate_request_tolerates_an_unanswered_observation(self):
+        self.active_and_watched()
+        self.sensor.lost_replies = operational.PROBE_RETRIES
+        with self.assertLogs("ouster-state", "WARNING"):
+            self.controller.transition("active")
+        self.assertEqual(self.events, [])
+
+    def test_driver_is_restarted_when_every_repeat_goes_unanswered(self):
+        for layer in ("sensor", "driver"):
+            with self.subTest(layer=layer):
+                self.active_and_watched()
+                getattr(self, layer).lost_replies = operational.PROBE_RETRIES + 1
+                with self.assertLogs("ouster-state", "WARNING") as logs:
+                    self.controller.transition()
+                self.assertEqual(self.events, ["driver:stop", "sensor:NORMAL", "driver:start"])
+                self.assertEqual(self.pauses, [operational.PROBE_RETRY_PAUSE] * operational.PROBE_RETRIES)
+                self.assertEqual(len(logs.output), operational.PROBE_RETRIES)
+                self.assertEqual(self.controller.state()["state"], "active")
+
+    def test_answers_that_contradict_an_active_target_are_acted_on_at_once(self):
+        def parked():
+            self.sensor.mode, self.sensor.status = "STANDBY", "STANDBY"
+
+        def initializing():
+            self.sensor.status = "INITIALIZING"
+
+        def inactive():
+            self.driver.lc = "inactive"
+
+        def exited():
+            self.driver.process = None
+            self.sensor.lost_replies = 1
+
+        def rejected():
+            self.sensor.lost_replies = 1
+            self.sensor.lost_reply = SensorError("sensor active config has no valid operating_mode")
+
+        for fault in (parked, initializing, inactive, exited, rejected):
+            with self.subTest(fault=fault.__name__):
+                self.active_and_watched()
+                fault()
+                self.controller.transition()
+                self.assertEqual(self.pauses, [])
+                self.assertEqual(self.events[0], "driver:stop")
+                self.sensor.lost_reply = TimeoutError("timed out")
+
+    def test_standby_target_never_waits_for_a_repeat(self):
+        self.driver.process = object()
+        self.pauses = []
+        self.controller.pause = self.pauses.append
+        self.sensor.lost_replies = 1
+        self.controller.transition()
+        self.assertEqual(self.pauses, [])
+        self.assertEqual(self.events, ["driver:stop", "sensor:STANDBY"])
+
+    def test_shutdown_during_the_repeat_window_leaves_the_driver_to_shutdown(self):
+        self.controller.transition("active")
+        self.events.clear()
+        self.sensor.lost_replies = 1
+        self.controller.stop_event.wait = lambda seconds: True  # SIGTERM arrives while pausing
+        with self.assertLogs("ouster-state", "WARNING"), \
+                self.assertRaisesRegex(RuntimeError, "supervisor stopping"):
+            self.controller.transition()
+        self.assertEqual(self.events, [])
+        self.assertFalse(self.controller.changing.is_set())
+
     def test_shutdown_parks_after_stopping_and_preserves_restart_target(self):
         self.controller.transition("active")
         self.events.clear()
@@ -441,6 +559,158 @@ class ControllerTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 worker.join()
+
+
+class BudgetTests(unittest.TestCase):
+    """The client has to outwait the slowest request the supervisor still answers."""
+
+    def replay(self, target, *, active_after=None):
+        """Seconds a request takes when every step uses its whole budget. The lifecycle request
+        goes unanswered until `active_after` seconds after the driver was started (None: always)."""
+        clock = FakeClock()
+
+        class SlowSensor(FakeSensor):
+            def snapshot(self):
+                clock.sleep(2 * operational.SNAPSHOT_TIMEOUT)
+                return super().snapshot()
+
+            def ensure_mode(self, mode, **kwargs):
+                clock.sleep(operational.MODE_WAIT[mode])
+                super().ensure_mode(mode, **kwargs)
+
+        class SlowDriver(FakeDriver):
+            active_at = None
+
+            def lifecycle(self):
+                if not self.running():
+                    return "absent"
+                clock.sleep(operational.LIFECYCLE_TIMEOUT)
+                return "active" if self.active_at is not None and clock.now >= self.active_at else "unreachable"
+
+            def stop(self):
+                clock.sleep(operational.STOP_BUDGET)
+                super().stop()
+
+            def start(self):
+                super().start()
+                self.active_at = None if active_after is None else clock.now + active_after
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        sensor, driver = SlowSensor([]), SlowDriver([])
+        sensor.mode, sensor.status = "NORMAL", "RUNNING"
+        driver.process = object()  # a live driver that does not answer
+        controller = operational.Controller(sensor, driver, "active", Path(temp.name) / "target", clock=clock)
+        controller.pause = clock.sleep
+        try:
+            with self.assertLogs("ouster-state"):
+                controller.transition(target)
+            elapsed = clock.now
+            self.assertEqual(controller.state()["state"], target)
+        except RuntimeError as error:
+            elapsed = clock.now
+            self.assertIn("did not become active", str(error))
+            self.assertIsNone(active_after)
+        return operational.LOCK_WAIT + elapsed
+
+    def test_slowest_answers_fit_the_budget_the_client_outwaits(self):
+        failed = self.replay("active")
+        succeeded = self.replay("active", active_after=operational.ACTIVATION_WAIT - 1)
+        parked = self.replay("standby")
+        in_flight = operational.OBSERVE_BUDGET + operational.ACTIVATION_POLL
+        self.assertGreater(failed, succeeded)
+        self.assertGreater(succeeded, parked)
+        # The replay's observations fall where they fall; the budget also covers one that starts
+        # just before the activation deadline.
+        self.assertLessEqual(failed, operational.TRANSITION_BUDGET)
+        self.assertGreater(failed + in_flight, operational.TRANSITION_BUDGET)
+        self.assertGreater(succeeded, 300, "the previous client wait would have reported this success as a timeout")
+        self.assertGreaterEqual(operational.COMMAND_TIMEOUT, operational.TRANSITION_BUDGET + 30)
+
+    def test_client_waits_for_the_command_timeout(self):
+        from unittest.mock import MagicMock
+        for command, expected in (("activate", operational.COMMAND_TIMEOUT),
+                                  ("standby", operational.COMMAND_TIMEOUT), ("state", 15)):
+            with self.subTest(command=command), patch.object(operational.socket, "socket", MagicMock()) as factory:
+                connection = factory.return_value.__enter__.return_value
+                connection.makefile.return_value.__enter__.return_value.readline.return_value = \
+                    b'{"ok": true, "state": "active"}\n'
+                operational.client(command, output=False)
+                connection.settimeout.assert_called_once_with(expected)
+
+
+class IdentityTests(unittest.TestCase):
+    """Which reinitializations the supervisor caused: real mode changes against the firmware model."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.firmware = Firmware("v3.1.0")
+        patcher = patch("urllib.request.urlopen", side_effect=self.firmware)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        clock = FakeClock()
+        self.sensor = SensorHTTP("sensor", clock=clock, sleep=clock.sleep)
+        self.driver = FakeDriver([])
+        self.controller = operational.Controller(self.sensor, self.driver, "standby",
+                                                 Path(self.temp.name) / "target", clock=clock)
+        self.controller.stop_event.wait = lambda seconds: clock.sleep(seconds)  # never set
+
+    def resets(self):
+        info, resets = self.controller.sensor_seen
+        self.assertEqual(info["initialization_id"], self.firmware.initialization_id)
+        self.assertFalse(self.controller.reinit_expected)
+        return resets
+
+    def test_own_mode_changes_are_not_resets(self):
+        self.controller.transition()
+        first = self.firmware.initialization_id
+        self.controller.transition("active")
+        self.assertNotEqual(self.firmware.initialization_id, first)
+        self.assertEqual(self.resets(), 0)
+        self.controller.transition("standby")
+        self.controller.transition()
+        self.assertEqual(self.firmware.initialization_id, first + 2)
+        self.assertEqual(self.resets(), 0)
+
+    def test_driver_applying_its_config_is_not_a_reset_but_a_later_change_is(self):
+        start = self.driver.start
+
+        def start_and_configure():
+            start()
+            self.firmware.initialization_id += 1  # upstream set_config reinitializes on a difference
+
+        self.driver.start = start_and_configure
+        self.controller.transition("active")
+        self.assertEqual(self.resets(), 0)
+        self.firmware.initialization_id += 1  # nobody here asked for this one
+        self.controller.transition()
+        self.assertEqual(self.resets(), 1)
+        self.assertEqual(self.driver.events, ["driver:stop", "driver:start"])
+
+    def test_reboot_is_a_reset_although_the_supervisor_parks_the_sensor_again(self):
+        self.controller.transition()
+        self.firmware.persisted["operating_mode"] = "NORMAL"  # boots spinning
+        for unreachable in (0, 2):  # seen by the observation, or first by the recovery's own read
+            with self.subTest(unreachable=unreachable):
+                before = self.resets()
+                self.firmware.reboot()
+                self.firmware.unreachable = unreachable
+                self.controller.transition()
+                self.assertEqual(self.firmware.active["operating_mode"], "STANDBY")
+                self.assertEqual(self.resets(), before + 1)
+
+    def test_failed_mode_change_keeps_its_reinitialization_explained(self):
+        self.controller.transition()
+        self.firmware.never_runs = True
+        self.firmware.initializing_modes = {"NORMAL"}
+        with self.assertRaisesRegex(SensorError, "timed out"):
+            self.controller.transition("active")
+        self.assertTrue(self.controller.reinit_expected)
+        self.firmware.never_runs = False
+        self.controller.transition()
+        self.assertEqual(self.controller.state()["state"], "active")
+        self.assertEqual(self.resets(), 0)
 
 
 class ProcessTests(unittest.TestCase):
