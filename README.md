@@ -228,13 +228,19 @@ A running container has two operational states, managed through the launcher:
   active, and 31 stopping it again. A success that uses every budget answers after about 308
   seconds; with the previous 300-second wait the client could report it as a timeout. The
   numbers are named constants in `operational_state.py`, and the wait is derived from them.
+  For scale, on an OS-0-128 (firmware 2.5.3) and a Jetson Orin a change to standby took about
+  10 seconds, a change to active 35 to 38, and `up` from a parked sensor about 43.
 - Each five-second observation is two sensor HTTP requests and one lifecycle request. While the
   target is `active` and the driver process is alive, an observation that gets no answer (one
   of those requests timing out or failing in transit) is repeated twice, two seconds apart,
   before the driver is stopped, so one lost reply does not cost a driver restart. An answer
   that contradicts the target, or a driver process that exited, starts recovery at once.
-  Nothing is written to the sensor while the supervisor is asking again. The repeat count and
-  spacing (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) have not been confirmed on hardware.
+  Nothing is written to the sensor while the supervisor is asking again. On an OS-0-128
+  (firmware 2.5.3) driven from a Jetson Orin, a driver process frozen for 8 seconds was asked
+  again once and left running, and one frozen for good was replaced and active again 43 seconds
+  after it stopped answering, about 14 of them spent asking again. No observation went
+  unanswered on its own in a 16-minute run there, so how often the repeats
+  (`PROBE_RETRIES`, `PROBE_RETRY_PAUSE`) are needed in the field is still unmeasured.
 
 Firmware below 3.1 (including 2.4) uses the legacy config commands followed by `reinitialize`;
 newer firmware uses explicit nonpersistent staging. Temporary HTTP failures during spin-up
@@ -445,8 +451,11 @@ activated; the supervisor knows which reinitializations belong to its transition
 only the others to the health reporter. After one of its own, a cursor that carried on is
 checked for skipped events as usual and keeps its `alerts.epoch`; a cursor that started again
 from zero gets a new `alerts.epoch` without a gap. Polling pauses during a mode change, so
-alerts the sensor logs inside one are not followed. Not yet confirmed on hardware: that
-`initialization_id` changes on every reinitialization, and whether the alert cursor survives one.
+alerts the sensor logs inside one are not followed. Seen on an OS-0-128 with firmware 2.5.3:
+`initialization_id` rises on every reinitialization (by two for a change to standby, by one for
+a change to normal or an outside `reinitialize`), and the alert cursor carries on across all of
+them, so a reinitialization by itself lost no alert history there. A reboot or power cycle was
+not tried.
 
 Export `VEHICLE_ID` for fleet identity. Optional sensor YAML `health:` configures `interval_s`
 (default 1), `poll_interval_s` (5), `stale_after_s` (15), and `limits`. To reach the dashboard,
