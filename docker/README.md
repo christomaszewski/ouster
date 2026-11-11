@@ -19,7 +19,8 @@ hand-maintained apt list, so it tracks upstream automatically — with two slimm
 apt Recommends are off stage-wide, and `pcl_conversions` is skipped at exec time because the
 driver uses it header-only (its deb hard-depends on `libpcl-dev`, which would drag ~5 GB of
 compilers, VTK, Java and Boost -dev into the image). The image carries no OpenCV: the pinned
-driver decodes its optional mask image with a bundled single-header decoder.
+driver decodes its optional mask image with a bundled single-header decoder, and TIFF masks
+with libtiff (resolved by rosdep like the other dependencies).
 Optional SDK features (pcap/osf/viz/mapping) are built OFF, keeping the exec-only runtime
 correct and slim.
 Where upstream's manifests under-declare (libzip: linked unconditionally by `ouster_client` at

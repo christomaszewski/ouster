@@ -378,11 +378,12 @@ The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/
 
 The fork reads the optional mask image (`mask_path`) with a bundled single-header decoder
 instead of OpenCV, which the driver used for nothing else, so neither the build nor the runtime
-image installs OpenCV. PNG, JPEG, BMP, GIF, TGA, PSD and binary PGM/PPM masks are accepted; TIFF
-and WebP, which only OpenCV could read, are refused with a load error that lists the supported
-formats, and the service then reports `transitioning` while the driver keeps failing to start.
-The fork's tests decode each format and fit a mask to the scan; the regression target runs them.
-Keep this patch until upstream no longer needs OpenCV.
+image installs OpenCV. PNG, JPEG, BMP, GIF, TGA, PSD and binary PGM/PPM masks are decoded by
+that bundled decoder and TIFF by libtiff, which the image gets through the fork's manifest.
+WebP and the rarer formats only OpenCV could read are refused with a load error that lists the
+supported formats; when such a file reaches the driver through `driver_params.mask_path`, the
+service reports `transitioning` while the driver keeps failing to start. The fork's tests decode each format and fit a mask to the scan;
+the regression target runs them. Keep this patch until upstream no longer needs OpenCV.
 
 Use `python3 tools/fetch_upstream.py src` for both Docker and local source builds. It refuses to
 replace an existing `src/ouster-ros`; preserve any local work and select a fresh source directory
