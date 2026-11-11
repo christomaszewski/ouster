@@ -161,7 +161,7 @@ driver_params:
 # leave the cloud; the range, signal, reflectivity and near-IR images are zero there). Only pixels
 # whose 8-bit gray value is exactly 0 mask. The image should be scan-sized (rows = beams, columns
 # = azimuth steps); another size is resized with nearest-neighbour sampling and a warning.
-# PNG, JPEG, BMP, GIF, PSD, TIFF and binary PGM/PPM are accepted, and TGA when named *.tga;
+# PNG, JPEG, BMP, GIF, TIFF and binary PGM/PPM are accepted, and TGA when named *.tga;
 # prefer a lossless format, because JPEG leaves faint noise beside an edge that does not mask.
 # `path` is a file on the HOST. An absolute path is taken as written; a relative one is looked
 # for in this config file's directory and then in each directory above it, so a path written

@@ -21,4 +21,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 7b60961d3abe6d236ae11e08536aaf7bcabccfdf
+    version: 40f57c34ef6a36d797d1cf6e3c0e7624313d435f

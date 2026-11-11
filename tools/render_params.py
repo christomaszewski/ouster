@@ -64,9 +64,9 @@ def require_ident(what: str, value: str) -> str:
 MASK_CONTAINER_PATH = "/etc/ouster_driver/mask"
 MASK_MAX_BYTES = 64 * 1024 * 1024
 # What the pinned driver decodes. TGA has no signature, so it is accepted by name.
-MASK_FORMATS = "PNG, JPEG, BMP, GIF, PSD, TIFF, binary PGM/PPM, or TGA named *.tga"
-_MASK_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8", b"BM", b"GIF8", b"8BPS", b"II*\x00", b"MM\x00*",
-                    b"II+\x00", b"MM\x00+", b"P5", b"P6")
+MASK_FORMATS = "PNG, JPEG, BMP, GIF, TIFF, binary PGM/PPM, or TGA named *.tga"
+_MASK_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8", b"BM", b"GIF8", b"II*\x00", b"MM\x00*", b"II+\x00",
+                    b"MM\x00+", b"P5", b"P6")
 
 
 def mask_setting(cfg: dict, strict: bool) -> str:

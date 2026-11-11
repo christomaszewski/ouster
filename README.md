@@ -157,8 +157,8 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
 - `shutdown_state: standby` (default) — physically park on container shutdown;
   `unchanged` stops the driver without changing the sensor's operating mode.
 - `mask.path` (optional) — an image on the host whose black pixels blank the measurements at
-  the same position of every scan. PNG, JPEG, BMP, GIF, PSD, TIFF and binary PGM/PPM are
-  accepted, and TGA when the file is named `*.tga`. An absolute path is taken as written; a
+  the same position of every scan. PNG, JPEG, BMP, GIF, TIFF and binary PGM/PPM are accepted,
+  and TGA when the file is named `*.tga`. An absolute path is taken as written; a
   relative one is looked for in the config file's directory and then in each directory above
   it, nearest first, so `config/sensors/front-mask.png` written from the deployment root is
   found both from the config itself and from the copy rig renders under `var/rendered/`. A
@@ -391,9 +391,11 @@ The legacy IMU backport is submitted as [Ouster SDK PR #727](https://github.com/
 
 The fork reads the optional mask image (`mask_path`) with a bundled single-header decoder
 instead of OpenCV, which the driver used for nothing else, so neither the build nor the runtime
-image installs OpenCV. PNG, JPEG, BMP, GIF, TGA, PSD and binary PGM/PPM masks are decoded by
-that bundled decoder and TIFF by libtiff, which the image gets through the fork's manifest.
-WebP and the rarer formats only OpenCV could read are refused with a load error that lists the
+image installs OpenCV. PNG, JPEG, BMP, GIF, TGA and binary PGM/PPM masks are decoded by that
+bundled decoder and TIFF by libtiff, which the image gets through the fork's manifest. PSD is
+refused although the decoder knows it: it reads only RGB-mode files, so the usual grayscale
+mask would fail, and it changes semi-transparent pixels. WebP and the rarer formats only
+OpenCV could read are refused with a load error that lists the
 supported formats; when such a file reaches the driver through `driver_params.mask_path`, the
 service reports `transitioning` while the driver keeps failing to start (the launcher catches
 it earlier for `mask.path`). The fork's tests decode each format and fit a mask to the scan;

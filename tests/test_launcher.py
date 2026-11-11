@@ -328,7 +328,9 @@ exit 0
 
     def test_file_the_driver_cannot_read_is_refused_before_startup(self):
         webp = b"RIFF\x1a\x00\x00\x00WEBPVP8L"
+        psd = b"8BPS\x00\x01" + bytes(6) + b"\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x08\x00\x01"
         for name, content, message in (("front.webp", webp, "is not an image the driver reads"),
+                                       ("front.psd", psd, "is not an image the driver reads"),
                                        ("front.png", b"mask_path: text", "is not an image the driver reads"),
                                        ("empty.png", b"", "is empty")):
             with self.subTest(name=name):
@@ -339,6 +341,23 @@ exit 0
                 self.assertIn(message, result.stderr)
                 self.config.write_text(original)
         self.assertNotIn(" up", self.log.read_text())
+
+    def test_mask_path_with_spaces_and_shell_characters_is_only_ever_a_path(self):
+        # The path crosses two eval'd lines in the launcher; it must arrive as data.
+        folder = self.root / "masks $(touch pwned) ; `touch pwned2` 'q' \"dq\""
+        mask = folder / "front mask.png"
+        folder.mkdir()
+        mask.write_bytes(self.PNG)
+        self.config.write_text(self.config.read_text() + "\nmask:\n  path: " + json.dumps(str(mask)) + "\n")
+        result = self.run_launcher("up")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        copies = list((self.root / "var/run").glob("*.mask"))
+        self.assertEqual([c.read_bytes() for c in copies], [self.PNG])
+        self.assertIn(f"mask={copies[0]}", self.log.read_text())
+        for verb in ("status", "down", "state"):
+            self.assertEqual(self.run_launcher(verb).returncode, 0)
+        leaked = [str(p) for p in self.root.rglob("pwned*")] + [p for p in ("pwned", "pwned2") if Path(p).exists()]
+        self.assertEqual(leaked, [])
 
     def test_tga_has_no_signature_and_is_accepted_by_name(self):
         self.use_mask(self.config.parent / "front.TGA", content=bytes(18) + b"pixels")
