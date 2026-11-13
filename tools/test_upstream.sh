@@ -145,6 +145,13 @@ run_gtest "${test_root}/sdk-asan/tests/imu_packet_test" imu_packet_test
 # original build stage's install, which this check also verifies stays unchanged.
 cmake -S "${ros_source}" -B "${ros_build}" \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+# Keep the upstream point-cloud composition tests in the image gate too. These
+# cover the optimized destagger indexing, including negative row shifts, and
+# verify that the backport retains point order, fields and invalid-point values.
+cmake --build "${ros_build}" \
+  --target ouster_ros_test --parallel "${build_jobs}"
+run_gtest "${ros_build}/ouster_ros_test" ouster_ros_test
+
 cmake --build "${ros_build}" \
   --target ouster_ros_lidar_packet_handler_test --parallel "${build_jobs}"
 run_gtest \

@@ -14,11 +14,16 @@
 # from subscriber backpressure, with loopback and sensor-callback regressions.
 # The optional mask image is decoded by a bundled stb_image, and TIFF by libtiff, so the
 # driver links no OpenCV.
-# Retained by fork branch mask-loader-without-opencv. See README "Updating upstream".
+# Backports upstream f4c83a6 + bbe9a89: normalize destagger shifts per row
+# instead of dividing per point, with negative-shift validation and 96 original-cloud
+# equivalence cases. Also hoists organized output-row indexing out of the point loop.
+# Point fields, layout and sensor settings are unchanged.
+# Retained by fork branch codex/backport-cloud-conversion-optimizations.
+# See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
 repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 40f57c34ef6a36d797d1cf6e3c0e7624313d435f
+    version: 82a46b870451d9dac2d9eb1db8a953a6bff1d3b9

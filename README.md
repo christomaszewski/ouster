@@ -356,6 +356,17 @@ router — that is rig-managed infrastructure the session connects out to (endpo
 4. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
 5. Commit the manifests and message-source declaration together.
 
+The ROS fork also backports upstream `f4c83a6` and its correctness follow-up `bbe9a89`.
+Destagger shifts are normalized once per row, removing the modulo from the per-point loop.
+Both commits are required: sensor metadata contains negative row shifts. The backport keeps
+package versions, message definitions and sensor configuration unchanged. The image regression
+gate runs the upstream point-cloud suite, including 96 additional cases comparing the original
+cloud fields, order, invalid values, timestamps and 48-byte PointCloud2 layout with the previous
+conversion. Invalid pixel-shift metadata is rejected during processor construction.
+The fork also calculates organized output-row indices once per row, removing the remaining
+integer division from the tested ARM64 original/LEGACY point loop. See the
+[real-sensor comparison](docs/cpu-backport-2026-11-13.md) for measured gains and limits.
+
 The ROS fork keeps each completed scan's sensor timestamp and ROS message timestamp in the same
 queue slot as its data. Its regression blocks the consumer while subsequent scans complete and
 checks scan/header/per-point timing across the supported timestamp modes. Complete 128-beam,
