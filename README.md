@@ -170,6 +170,28 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   empty or not one of those formats. `driver_params.mask_path` still names a file already
   inside the container; setting both is an error.
 
+### Image demand and processing
+
+With `IMG` enabled, the driver processes each supported image channel only when its publisher
+has a subscriber, including an intra-process subscriber. A range-image subscriber therefore
+avoids signal/reflectivity exposure and near-IR beam correction. Subscribing only to a second
+return still performs the first-return exposure update needed for that channel. Normal ROS
+discovery can delay the first output until a later scan. Point-cloud, scan, IMU, raw and telemetry
+processing retain their existing behavior.
+
+Set `driver_params.image_always_process: true` to process all images continuously. The default
+is `false`; the setting is read when the processing handlers are configured, so apply it through
+the normal configuration/restart workflow. Unsubscribed image families pause their exposure and
+beam-correction histories, and joining or rejoining after a scene change can require a brief
+brightness adjustment. The override retains continuous history. RGB tone mapping shared with
+color point clouds remains in the packet handler, independently of image subscribers.
+
+The fork also reuses image scratch buffers, destaggers contiguous row spans, and writes point
+fields directly into owned PointCloud2 buffers. The SDK uses smaller, contiguous exposure and
+beam-correction scratch. Message field layouts and sensor settings remain unchanged. See the
+[real-sensor comparison](docs/cpu-demand-optimization-2026-11-13.md) for validation, CPU/cache
+measurements, subscriber transitions and the loop-unrolling experiment.
+
 ### Temperature and thermal status
 
 The wrapper publishes **`/<ns>/temperature`** as `sensor_msgs/msg/Temperature` from the

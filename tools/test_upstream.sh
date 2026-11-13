@@ -124,8 +124,8 @@ if int(result.get("failures", "0")) or int(result.get("errors", "0")):
 PY
 }
 
-# Compile the actual SDK receive implementation with ASan. Building the two
-# targets explicitly fails if a source pin drops either regression.
+# Compile the actual SDK receive and image-processing implementations with ASan.
+# Explicit targets fail if a source pin drops a required regression.
 cmake -S "${sdk_source}" -B "${test_root}/sdk-asan" -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -135,9 +135,11 @@ cmake -S "${sdk_source}" -B "${test_root}/sdk-asan" -G Ninja \
   -DBUILD_SENSOR=ON -DBUILD_EXAMPLES=OFF \
   -DBUILD_PCAP=OFF -DBUILD_OSF=OFF -DBUILD_VIZ=OFF -DBUILD_MAPPING=OFF
 cmake --build "${test_root}/sdk-asan" \
-  --target client_receive_test imu_packet_test --parallel "${build_jobs}"
+  --target client_receive_test imu_packet_test image_processing_test \
+  --parallel "${build_jobs}"
 run_gtest "${test_root}/sdk-asan/tests/client_receive_test" client_receive_test
 run_gtest "${test_root}/sdk-asan/tests/imu_packet_test" imu_packet_test
+run_gtest "${test_root}/sdk-asan/tests/image_processing_test" image_processing_test
 
 # Enable tests in the inherited Release tree, preserving its cached generator,
 # flags and compiler launchers. These tests remain uninstrumented; ASan uses the
@@ -151,6 +153,13 @@ cmake -S "${ros_source}" -B "${ros_build}" \
 cmake --build "${ros_build}" \
   --target ouster_ros_test --parallel "${build_jobs}"
 run_gtest "${ros_build}/ouster_ros_test" ouster_ros_test
+
+# Preserve image bytes when demanded and verify per-channel subscriber gating,
+# including shared exposure state for dual returns and subscriber transitions.
+cmake --build "${ros_build}" \
+  --target ouster_ros_image_processor_test --parallel "${build_jobs}"
+RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
+  "${ros_build}/ouster_ros_image_processor_test" ouster_ros_image_processor_test
 
 cmake --build "${ros_build}" \
   --target ouster_ros_lidar_packet_handler_test --parallel "${build_jobs}"
