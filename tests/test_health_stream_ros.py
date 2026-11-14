@@ -2,8 +2,8 @@
 
 Needs rclpy and the built ouster_sensor_msgs, so it runs in the packaged runtime image (CI sets
 OUSTER_TEST_ENTRYPOINT_DIR to the shipped entrypoints) and is skipped on a bare host. There it
-runs twice: under the RMW the environment selects (Fast DDS in the image), and under
-rmw_zenoh_cpp through a router of its own, which is what deployments run."""
+runs at both packet-rate and 10 Hz telemetry under the selected RMW (Fast DDS in the image),
+and under rmw_zenoh_cpp through a router of its own, which is what deployments run."""
 
 import importlib.util
 import json
@@ -64,6 +64,11 @@ class StreamSamplingTests(unittest.TestCase):
     RATE = 400  # packets per second, the order of the driver's per-packet telemetry
 
     def test_stream_is_sampled_per_heartbeat_and_its_loss_is_reported(self):
+        for rate in (self.RATE, 10):
+            with self.subTest(telemetry_rate_hz=rate):
+                self.check_stream(rate)
+
+    def check_stream(self, rate):
         import rclpy
         from rclpy.context import Context
         from rclpy.executors import SingleThreadedExecutor
@@ -103,7 +108,7 @@ class StreamSamplingTests(unittest.TestCase):
         sent = [0]
 
         def publish():
-            message, period, following = Telemetry(), 1.0 / self.RATE, time.monotonic()
+            message, period, following = Telemetry(), 1.0 / rate, time.monotonic()
             while not finished.is_set():
                 if publishing.is_set():
                     publisher.publish(message)
@@ -132,7 +137,10 @@ class StreamSamplingTests(unittest.TestCase):
             spin_until(lambda: len(rows) >= start_rows + 10, 20, "diagnostics stopped")
             heartbeats, packets = len(rows) - start_rows, sent[0] - start_sent
             observed = rows[-1][2] - first
-            self.assertGreater(packets, 5 * heartbeats, "the fixture must outpace the heartbeat")
+            if rate == self.RATE:
+                self.assertGreater(packets, 5 * heartbeats, "the fixture must outpace the heartbeat")
+            else:
+                self.assertGreater(packets, 0, "the limited-rate fixture must publish")
             self.assertEqual(rows[-1][0], DiagnosticStatus.OK)
             # One observation per heartbeat that found a new packet: never one per packet. The
             # lower bound only has to tell sampling from not observing at all, so it leaves room

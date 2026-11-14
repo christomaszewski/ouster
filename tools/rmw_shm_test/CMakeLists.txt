@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(shm_probe)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+add_executable(shm_probe probe.cpp)
+target_link_libraries(shm_probe rclcpp::rclcpp ${sensor_msgs_TARGETS})

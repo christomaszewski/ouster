@@ -14,11 +14,24 @@
 # from subscriber backpressure, with loopback and sensor-callback regressions.
 # The optional mask image is decoded by a bundled stb_image, and TIFF by libtiff, so the
 # driver links no OpenCV.
-# Retained by fork branch mask-loader-without-opencv. See README "Updating upstream".
+# Backports upstream f4c83a6 + bbe9a89: normalize destagger shifts per row
+# instead of dividing per point, with negative-shift validation and 96 original-cloud
+# equivalence cases. Also hoists organized output-row indexing out of the point loop.
+# Point fields, layout and sensor settings are unchanged.
+# Images process only demanded channels by default, with image_always_process as an override.
+# Image scratch/span reuse and direct PointCloud2 writes preserve output fields/layout.
+# Optional organized_cloud_crop retains fields/row alignment while reducing cloud width
+# to the metadata-derived azimuth interval; default full-frame output is unchanged.
+# XYZ is fused into the final cloud write; native image reads and selected-ring
+# LaserScan extraction avoid intermediate full-frame copies. Telemetry coalescing
+# is reset safely across reconfiguration. The ROS default is per-packet; this service
+# supplies a 10 Hz default, with explicit telemetry_max_rate_hz: 0.0 to opt out.
+# Retention branch: perf/cpu-loop-telemetry-20261113.
+# See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
 repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 40f57c34ef6a36d797d1cf6e3c0e7624313d435f
+    version: f80d05c7a1255a365cfa2a36e218dd988a077b59

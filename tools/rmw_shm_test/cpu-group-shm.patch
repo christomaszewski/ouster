@@ -1,0 +1,109 @@
+diff --git a/rmw_zenoh_cpp/src/detail/rmw_publisher_data.cpp b/rmw_zenoh_cpp/src/detail/rmw_publisher_data.cpp
+index 9dc1de8..40cfef6 100644
+--- a/rmw_zenoh_cpp/src/detail/rmw_publisher_data.cpp
++++ b/rmw_zenoh_cpp/src/detail/rmw_publisher_data.cpp
+@@ -19,6 +19,7 @@
+ #include <array>
+ #include <cinttypes>
+ #include <cstring>
++#include <cstdlib>
+ #include <iomanip>
+ #include <memory>
+ #include <mutex>
+@@ -277,7 +278,11 @@ rmw_ret_t PublisherData::publish_buffer_aware(
+   const void * ros_message,
+   ShmContext * shm)
+ {
+-  (void)shm;  // SHM not currently used for buffer-aware publishing
++  // Experimental opt-in; compare the same binary with the original path.
++  static const bool use_cpu_shm = [] {
++      const char * value = std::getenv("OUSTER_EXPERIMENT_CPU_GROUP_SHM");
++      return value && std::strcmp(value, "1") == 0;
++    }();
+ 
+   rmw_context_impl_t * ctx_impl = static_cast<rmw_context_impl_t *>(rmw_node_->context->impl);
+   auto * backend_ctx = ctx_impl->buffer_backend_context();
+@@ -318,15 +323,36 @@ rmw_ret_t PublisherData::publish_buffer_aware(
+       ros_message, type_support_impl_);
+ 
+     rcutils_allocator_t * allocator = &rmw_node_->context->options.allocator;
+-    void * data = allocator->allocate(max_data_length, allocator->state);
++    std::optional<zenoh::ZShmMut> cpu_shm;
++    void * data = nullptr;
++    if (use_cpu_shm && shm && max_data_length >= shm->msgsize_threshold) {
++      if (auto provider = shm->get_shm_provider(*sess_)) {
++        auto allocation = provider.value().shm_provider().alloc_gc_defrag(max_data_length);
++        if (std::holds_alternative<zenoh::ZShmMut>(allocation)) {
++          cpu_shm.emplace(std::get<zenoh::ZShmMut>(std::move(allocation)));
++          if (cpu_shm->len() >= max_data_length && cpu_shm->data()) {
++            data = cpu_shm->data();
++            RMW_ZENOH_LOG_DEBUG_NAMED(
++              "rmw_zenoh_cpp", "Experimental CPU-group SHM allocation: %zu", max_data_length);
++          } else {
++            cpu_shm.reset();
++          }
++        }
++      }
++    }
++    if (!data) {
++      data = allocator->allocate(max_data_length, allocator->state);
++    }
+     if (!data) {
+       RMW_SET_ERROR_MSG("failed to allocate CPU-group serialization buffer");
+       return RMW_RET_BAD_ALLOC;
+     }
+ 
+     auto always_free_data = rcpputils::make_scope_exit(
+-      [data, allocator]() {
+-        allocator->deallocate(data, allocator->state);
++      [&data, allocator, &cpu_shm]() {
++        if (!cpu_shm) {
++          allocator->deallocate(data, allocator->state);
++        }
+       });
+ 
+     uint8_t * msg_bytes = static_cast<uint8_t *>(data);
+@@ -342,10 +368,39 @@ rmw_ret_t PublisherData::publish_buffer_aware(
+     }
+ 
+     const size_t data_length = ser.get_serialized_data_length();
+-    auto deleter = [data, allocator](uint8_t *) {
+-        allocator->deallocate(data, allocator->state);
+-      };
+-    auto payload = zenoh::Bytes(msg_bytes, data_length, deleter);
++    if (data_length > max_data_length || (cpu_shm && data_length > cpu_shm->len())) {
++      RMW_SET_ERROR_MSG("CPU-group serialized size exceeds allocated capacity");
++      return RMW_RET_ERROR;
++    }
++    if (cpu_shm && data_length != cpu_shm->len()) {
++      // ZShmMut has no length-changing API. Preserve the original raw CDR
++      // payload length when the estimate overallocates, rather than publishing
++      // padding as extra serialized bytes. Keep unused SHM bytes initialized.
++      const size_t capacity = cpu_shm->len();
++      std::memset(msg_bytes + data_length, 0, capacity - data_length);
++      void * exact_data = allocator->allocate(data_length, allocator->state);
++      if (!exact_data) {
++        RMW_SET_ERROR_MSG("failed to allocate exact-length CPU-group serialization buffer");
++        return RMW_RET_BAD_ALLOC;
++      }
++      std::memcpy(exact_data, msg_bytes, data_length);
++      cpu_shm.reset();
++      data = exact_data;
++      msg_bytes = static_cast<uint8_t *>(data);
++      RMW_ZENOH_LOG_DEBUG_NAMED(
++        "rmw_zenoh_cpp", "CPU-group SHM exact-length heap fallback: %zu of %zu bytes",
++        data_length, capacity);
++    }
++    zenoh::Bytes payload;
++    if (cpu_shm) {
++      // Transport owns this exact-length allocation through the last reader's release.
++      payload = zenoh::Bytes(std::move(*cpu_shm));
++    } else {
++      auto deleter = [data, allocator](uint8_t *) {
++          allocator->deallocate(data, allocator->state);
++        };
++      payload = zenoh::Bytes(msg_bytes, data_length, deleter);
++    }
+     always_free_data.cancel();
+ 
+     int64_t source_timestamp = rmw_zenoh_cpp::get_system_time_in_ns();

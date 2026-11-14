@@ -1,0 +1,2 @@
+# Unified diff context lines use one space for an empty source line.
+tools/rmw_shm_test/cpu-group-shm.patch whitespace=-blank-at-eol

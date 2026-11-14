@@ -14,7 +14,7 @@
 """Render a generic *rig* sensor config into the upstream Ouster driver's ROS 2 params file.
 
 The sensor config is the single source of truth (uniform across all rig services). `driver_params`
-is OPAQUE -- copied verbatim into ros__parameters -- while the `connection` block is DERIVED onto
+is copied into ros__parameters, with a 10 Hz telemetry default when omitted, while `connection` is DERIVED onto
 upstream's flat connection params (sensor_hostname / udp_dest / lidar_port / imu_port). The
 optional `zenoh:` block never reaches the params doc: it is validated here, rendered to ONE
 ZENOH_CONFIG_OVERRIDE pair string, and emitted (`--env` mode) for the entrypoint's in-container
@@ -321,6 +321,9 @@ def main() -> int:
     merged.update(derive_connection(connection))
     for key, value in (cfg.get("driver_params") or {}).items():
         merged[key] = value
+    # Service policy: unchanged packet status needs only a heartbeat. Explicit 0.0
+    # preserves per-packet telemetry; the pinned driver's standalone default is 0.0.
+    merged.setdefault("telemetry_max_rate_hz", 10.0)
     # A host mask image is mounted at one fixed path; point the driver at it. The driver's own
     # mask_path stays available for a file that is already inside the container.
     if mask_setting(cfg, strict=True):

@@ -170,6 +170,55 @@ One generic rig config per sensor instance (see `sensors/ouster.example.yaml`):
   empty or not one of those formats. `driver_params.mask_path` still names a file already
   inside the container; setting both is an error.
 
+### Image demand and processing
+
+With `IMG` enabled, the driver processes each supported image channel only when its publisher
+has a subscriber, including an intra-process subscriber. A range-image subscriber therefore
+avoids signal/reflectivity exposure and near-IR beam correction. Subscribing only to a second
+return still performs the first-return exposure update needed for that channel. Normal ROS
+discovery can delay the first output until a later scan. Point-cloud, scan, IMU, raw and telemetry
+processing retain their existing behavior.
+
+Set `driver_params.image_always_process: true` to process all images continuously. The default
+is `false`; the setting is read when the processing handlers are configured, so apply it through
+the normal configuration/restart workflow. Unsubscribed image families pause their exposure and
+beam-correction histories, and joining or rejoining after a scene change can require a brief
+brightness adjustment. The override retains continuous history. RGB tone mapping shared with
+color point clouds remains in the packet handler, independently of image subscribers.
+
+The fork also reads decoded image fields directly, reuses image scratch buffers, and destaggers
+contiguous row spans. Cloud conversion calculates XYZ while writing the final PointCloud2
+buffer, avoiding the full XYZ intermediate. The SDK uses smaller, contiguous exposure and
+beam-correction scratch and combines exposure passes while preserving rounding. Message field
+layouts and sensor settings remain unchanged. See the
+[initial real-sensor comparison](docs/cpu-demand-optimization-2026-11-13.md) for subscriber
+transitions and loop unrolling, and the [follow-up study](docs/cpu-next-2026-11-13.md) for
+fused cloud conversion, native image reads and selected-ring LaserScan measurements.
+
+### Cropped organized clouds
+
+Set `driver_params.organized_cloud_crop: true` together with `organized: true` to
+publish only the organized column interval needed by the sensor's configured azimuth
+window. The default is `false`. The crop retains point fields, their offsets and stride,
+row organization, timestamps and coordinates; `width`, `row_step` and data length change.
+It takes effect when the cloud handler is configured, in both the combined driver and
+the separate cloud component.
+
+The interval is derived from metadata and stays fixed while that configuration is active.
+It covers the union of the selected rows' destaggered columns, so edge holes remain NaN
+and a half-revolution window can require more than half the original columns. Each row
+uses the same original-column interval, including wraparound; rows are not compacted
+independently. The driver logs the crop's original column origin and width. PointCloud2
+does not carry the origin, so consumers that require original sensor-column indices must
+derive it from the sensor metadata and the configured destagger/row reduction settings.
+Consumers must also accept the smaller dimensions.
+
+The crop reduces cloud Cartesian calculation and packing work. Full SDK scan storage remains;
+image, LaserScan and raw-packet layouts retain their existing behavior.
+The option does not set the sensor azimuth window itself. Full-azimuth output keeps its
+full dimensions. See the [crop and GPU study](docs/cpu-crop-gpu-2026-11-13.md) for the
+real-sensor comparison and the separate GPU test's scope.
+
 ### Temperature and thermal status
 
 The wrapper publishes **`/<ns>/temperature`** as `sensor_msgs/msg/Temperature` from the
@@ -196,12 +245,26 @@ operational state. No zero or previous reading is substituted. `sensor_msgs` is 
 interface, so recording this topic needs no additional fleet message package.
 
 The driver publishes `ouster_sensor_msgs/msg/Telemetry` on **`/<ns>/telemetry`**:
-thermal-shutdown and shot-limiting status plus their countdowns, stamped from every lidar
-packet's header (packet rate — ~640 msgs/s at 1024x10). It is **on by default** via the `TLM`
+thermal-shutdown and shot-limiting status plus their countdowns, stamped from a received lidar
+packet. It is **on by default** via the `TLM`
 token in the `proc_mask` driver param (node default `IMU|PCL|SCAN|IMG|RAW|TLM`; drop `TLM` to
 disable). `ouster_sensor_msgs` is already pinned in `rigging.yaml`'s `msgs:` block, so the
 fleet bag logger can record it as-is. This topic carries thermal status flags, not temperature
 measurements, and goes **silent in standby** because it is derived from lidar packets.
+LEGACY packets omit all four status/countdown fields; the SDK returns zeros for unavailable
+fields, so this topic acts as a packet-arrival heartbeat in that profile. HTTP temperature
+and sensor-alert polling remain independent.
+
+Starting with v0.7.0, the service defaults to
+`driver_params.telemetry_max_rate_hz: 10.0` for unchanged status. Set `0.0` explicitly to retain
+one telemetry message per lidar packet (about 640/s at 1024×10 or 1,280/s at 2048×10).
+The standalone ROS driver's default remains `0.0`; the service supplies its default when
+rendering parameters. Any change in either status or countdown publishes immediately,
+so changes can exceed the selected heartbeat rate. Headers still come from the received
+packet; no message is synthesized when packets stop. This option reduces telemetry samples
+available to recorders; it does not change clouds, images, IMU, raw packets, or sensor settings.
+The combined driver reads it when publishers are configured, so apply it through the normal
+configuration/restart workflow. The temperature topic's HTTP polling is independent.
 
 ## Operational states (`standby` / `activate` / `state`)
 
@@ -339,6 +402,17 @@ The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
 router — that is rig-managed infrastructure the session connects out to (endpoint overridable via
 `ZENOH_CONFIG_OVERRIDE`) — see [docker/README.md](docker/README.md) "RMW selection / Zenoh".
 
+The [CPU/GPU follow-up study](docs/cpu-next-2026-11-13.md) covers fused cloud construction,
+native image reads, selected-ring LaserScan extraction, telemetry coalescing, and isolated
+shared-memory/CUDA experiments. The default runtime remains CPU based.
+
+The [combined comparison against the original driver](docs/cpu-combined-2026-11-14.md)
+measures complete configurations with the real sensor and unchanged full-width cloud/image
+outputs. Optimized CPU with explicit `driver_params.telemetry_max_rate_hz: 10.0` reduces
+service CPU by 54.30% in that graph and is the recommended practical configuration. GPU plus
+experimental direct SHM serialization reaches 64.07%; its deployment limitations are documented
+in the report. The v0.7.0 service default is 10 Hz; explicit `0.0` restores unlimited telemetry.
+
 ## Updating upstream
 
 1. Rebase the ROS fixes onto a compatible upstream release, run their regressions, and publish
@@ -355,6 +429,17 @@ router — that is rig-managed infrastructure the session connects out to (endpo
    `docker build -f docker/Dockerfile.runtime -t ouster_driver:latest .`).
 4. Skim upstream `CHANGELOG.rst` for renamed launch args / params.
 5. Commit the manifests and message-source declaration together.
+
+The ROS fork also backports upstream `f4c83a6` and its correctness follow-up `bbe9a89`.
+Destagger shifts are normalized once per row, removing the modulo from the per-point loop.
+Both commits are required: sensor metadata contains negative row shifts. The backport keeps
+package versions, message definitions and sensor configuration unchanged. The image regression
+gate runs the upstream point-cloud suite, including 96 additional cases comparing the original
+cloud fields, order, invalid values, timestamps and 48-byte PointCloud2 layout with the previous
+conversion. Invalid pixel-shift metadata is rejected during processor construction.
+The fork also calculates organized output-row indices once per row, removing the remaining
+integer division from the tested ARM64 original/LEGACY point loop. See the
+[real-sensor comparison](docs/cpu-backport-2026-11-13.md) for measured gains and limits.
 
 The ROS fork keeps each completed scan's sensor timestamp and ROS message timestamp in the same
 queue slot as its data. Its regression blocks the consumer while subsequent scans complete and
@@ -448,7 +533,8 @@ in standby, while skipping transitions. Power is input mV × mA / 1,000,000 watt
 readings are not zero. The existing temperature topic remains available.
 
 Stream health samples the driver's `telemetry` topic once per heartbeat instead of handling
-every message. The driver publishes one message per lidar packet (640 to 1,280 per second); the
+every message. With unlimited telemetry the driver publishes one message per lidar packet
+(640 to 1,280 per second); the
 health node keeps only the newest in a depth-1 subscription that its executor never waits on,
 and each heartbeat takes it without deserializing. Measured in the runtime image on a 2.3 GHz
 x86-64 core with Fast DDS, a Python callback per packet cost 20% of a core at 640 packets/s and
