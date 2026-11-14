@@ -189,6 +189,15 @@ LD_LIBRARY_PATH="${ros_build}:${LD_LIBRARY_PATH:-}" \
   "${ros_build}/ouster_ros_raw_packet_sensor_test" \
   ouster_ros_raw_packet_sensor_test
 
+# Reconfiguring the combined driver must release prior telemetry state and
+# publishers, including when TLM is removed from the processor mask.
+cmake --build "${ros_build}" \
+  --target ouster_ros_telemetry_reconfigure_test --parallel "${build_jobs}"
+LD_LIBRARY_PATH="${ros_build}:${LD_LIBRARY_PATH:-}" \
+  RMW_IMPLEMENTATION=rmw_fastrtps_cpp run_gtest \
+  "${ros_build}/ouster_ros_telemetry_reconfigure_test" \
+  ouster_ros_telemetry_reconfigure_test
+
 # Decode each accepted mask format, refuse the others, and fit a mask to the scan
 # through the same library entry point the nodes use.
 cmake --build "${ros_build}" \

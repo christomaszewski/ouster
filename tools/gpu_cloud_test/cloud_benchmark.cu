@@ -121,6 +121,7 @@ void validation(const std::vector<Frame>& frames,Roi roi,const std::vector<Metho
         for(auto& method:methods){bool got=method.run(f,actual);compare(expected,actual,f.name+" "+method.name);if(got!=dense)throw std::runtime_error("is_dense differs: "+method.name);}
     }
 }
+#ifndef CLOUD_BENCHMARK_LIBRARY
 int main(int argc,char** argv) try {
     Options o=options(argc,argv);
 #ifdef CLOUD_CPU_ONLY
@@ -173,3 +174,4 @@ int main(int argc,char** argv) try {
     if(!o.output.empty()){fs::create_directories(o.output);for(auto& m:methods){m.run(frames.front(),output);write_binary(fs::path(o.output)/(m.name+".cloud48"),output.data(),output.size());}}
     return 0;
 }catch(const std::exception& e){std::cerr<<"ERROR: "<<e.what()<<'\n';return 1;}
+#endif

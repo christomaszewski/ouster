@@ -143,8 +143,12 @@ explicitly rather than silently changing the toolchain.
 
 Or run `build_cuda.sh OUTPUT_DIRECTORY` directly in a suitable ARM64 Linux
 compiler environment. Set `OUSTER_CUDA_ROOT` and `OUSTER_CUDA_HOST_COMPILER` if
-needed. The binary statically links the CUDA runtime, still requires the target
-NVIDIA driver, and does not bundle driver libraries. Compiler flags are `-O3`,
+needed. Both build scripts produce `cloud_benchmark`, `cloud_benchmark_next`,
+`native_benchmark` and `libouster_gpu_cloud.so`, plus compiler and SHA-256
+records. Keep `native_benchmark` beside its shared library when transferring it;
+its runtime search path is `$ORIGIN`. The CUDA binaries and library statically
+link the CUDA runtime, still require the target NVIDIA driver, and do not bundle
+driver libraries. Compiler flags are `-O3`,
 `sm_87`, precise math and no flush-to-zero; **no `--use_fast_math`**. The current
 production ARM64 Cartesian code uses FMA; this test uses explicit CPU
 `std::fma` and GPU `__fmaf_rn` to match it.
@@ -201,3 +205,244 @@ Retain this README, `Dockerfile.compiler`, `CMakeLists.txt`, `cloud_common.hpp`,
 Keep captured data/metadata, fixture clouds, toolkits, compiler images, binaries,
 logs and timing artifacts outside the tracked source directory. This tooling
 does not change wrapper source pins or select a production GPU implementation.
+
+## Further mapped-memory experiments
+
+The same build now also produces `cloud_benchmark_next`. The original executable
+remains the control. The extended executable keeps the exact 48-byte schema,
+float32 FMA, range thresholds, timestamp mapping, NaNs, density and rectangular
+crop semantics. Every point, including homogeneous coordinate and padding, is
+written on every invocation. Validation poisons the destination bytes first to
+detect incomplete writes.
+
+Its default methods all accept ordinary decoded host arrays and return a fully
+materialized ordinary host `std::vector<Point48>`:
+
+| Method | Change from the mapped control |
+| --- | --- |
+| `cpu_fused` | Existing standalone CPU reference |
+| `gpu_mapped_io` | Original mapped input/output staging and both host copies |
+| `gpu_soa_128`, `gpu_soa_256`, `gpu_soa_512` | Device calibration LUT transposed once into X/Y/Z planes; indicated block size |
+| `gpu_tiled_256` | SoA LUT plus shared-memory rearrangement into contiguous 16-byte output chunks |
+| `gpu_graph_256` | SoA 256-thread kernel submitted through a reusable CUDA graph |
+
+All SoA variants read the current timestamp/range limits from a small mapped
+state record, updated before submission. The graph uses the same fixed input,
+output and state addresses. It does not cache captured frame timestamps or omit
+per-frame updates. The graph contains the kernel; ordinary input staging,
+blocking completion, density reduction and final output materialization remain
+inside the timed call. LUT transposition, graph creation and allocation are
+one-time setup; their wall and process CPU times are logged separately.
+
+Three optional methods test allocation ownership explicitly:
+
+| Method | Ownership and charged work |
+| --- | --- |
+| `gpu_register_each_frame` | Registers the caller's existing decoded arrays and output vector, maps their addresses, launches and waits, then unregisters them **inside every timed call**; no staging copies |
+| `gpu_registered_output` | Registers one stable output vector at setup; still copies decoded arrays into pinned input each frame; GPU writes the final host vector directly |
+| `gpu_registered_all` | Registers stable decoded-array allocations and the output vector at setup; GPU reads/writes them directly and waits before returning |
+
+These are CPU-readable standard point bytes, not GPU-resident output or ROS
+transport zero-copy. The persistent methods require a future allocator/pool
+contract: registered storage cannot move, resize or be freed while registered,
+and a completed output cannot be reused while a subscriber retains it. The
+benchmark owns one synchronous output buffer; it does not implement ROS message
+retention, a production pool, inter-frame overlap or a GPU driver backend.
+The fixture arrays form a fixed eight-scan pool in the real study. Future
+decoding could refill stable allocations only after GPU completion; that decode
+work is outside this benchmark just as it is for every other method.
+
+Only one registration method may be selected per invocation. Its controls use
+the same output allocation, and their results should be compared within that
+invocation. Registration merges overlapping host pages before mapping and checks
+device support. Negative tests reject replacement persistent output/input
+allocations and malformed sizes before launch. Unregistering/freeing occurs
+after completion. The per-frame registration method charges address mapping and
+unregistration; persistent methods log their amortized setup separately.
+
+NVIDIA documents the different pinned/registered memory caching behavior and
+shared DRAM on Tegra in its [Tegra application note](https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/index.html).
+The [CUDA 13.2 memory API](https://docs.nvidia.com/cuda/archive/13.2.2/cuda-runtime-api/group__CUDART__MEMORY.html)
+defines registering existing host allocations and retrieving their device
+addresses. Support is queried at runtime; the experiment does not assume that
+arbitrary pageable memory is accessible to the GPU.
+
+Example bounded workflow, with the sensor idle and other profiling stopped:
+
+```sh
+# Every group: synthetic edge cases, all real frames, and a wrapped ROI.
+taskset -c 2 bash run_next_matrix.sh ./cloud_benchmark_next fixtures out-validate validate
+
+# Two repeats; reverse group/ROI ordering on repeat, rotate methods per round.
+ITERATIONS=64 ROUNDS=5 taskset -c 2 bash run_next_matrix.sh \
+  ./cloud_benchmark_next fixtures out-burst burst
+
+# After inspecting burst results, pace a small selected group at 10 Hz.
+ITERATIONS=32 ROUNDS=3 taskset -c 2 bash run_next_matrix.sh \
+  ./cloud_benchmark_next fixtures out-paced paced \
+  cpu_fused,gpu_mapped_io,gpu_soa_256,gpu_registered_all
+```
+
+`--methods` also works directly on the executable. `--period-ms 100` sleeps
+between calls using an absolute schedule. `wall_ms` and `cpu_ms` sum the timed
+processing calls; pacing sleeps are excluded. GPU completion waiting is included.
+`elapsed_ms` reports the whole round including sleeps, and `deadline_misses`
+counts processing calls that finish after the next scheduled release. Divide
+wall/process totals by `iterations`; medians of these rows are medians of round
+averages, not per-frame tail-latency percentiles. Setup, validation, hashing and
+publication are excluded. No energy or complete-service CPU claim follows from
+these measurements.
+
+Use the actual production-header CPU comparator, and any validated newer CPU
+candidate, alongside these same-compiler standalone controls. A faster GPU
+variant must beat the relevant CPU implementation after required host ownership
+costs. Stream overlap/double buffering needs a downstream-consumer lifetime model;
+this bounded experiment tests graph submission and 10 Hz pacing first.
+
+Retain `cloud_benchmark_next.cu` and `run_next_matrix.sh` with the original source
+file list above. Do not commit captured scans, toolkit files or binaries.
+
+## Native LEGACY fields and experimental C ABI
+
+The original fixture exporter widens LEGACY `SIGNAL` from u16 to u32 and
+`REFLECTIVITY` from u8 to u16. The first registered-scan experiment uses those
+fixture arrays, so its no-input-copy result alone is not evidence of attaching
+directly to native SDK scan arrays.
+
+`native_benchmark` and `libouster_gpu_cloud.so` address that distinction. At
+fixture load, the harness validates and narrows those two fields once to model
+the decoder's native storage. The timed backend reads u32 range, u16 signal, u8
+reflectivity, u16 near-IR and u64 column timestamps directly. No per-frame
+widening is omitted. Output-only mode charges a native input staging copy of
+`9 * width * height + 8 * width` bytes (plus internal alignment padding), then
+CUDA submission, blocking completion and density. The registered-all mode
+requires an explicitly registered pool of native arrays. The staged mode also
+copies the complete final cloud to the caller.
+
+The C API in `native_backend.h` exchanges only fixed-width scalars, native field
+pointers and a CPU-owned output byte span. It has no ROS/SDK C++ ABI dependency.
+The library statically links cudart and still requires the target NVIDIA driver.
+Its output kernel uses `memcpy` byte stores, preserving all 48 bytes without
+creating or dereferencing Point48 objects inside a `vector<uint8_t>`. Direct
+registered output must pass an explicit 16-byte alignment check. An alignment
+hint then permits vector stores; it never infers alignment from the byte-vector
+element type. Misaligned registered storage fails before launch, while staged
+CPU output copying accepts unaligned destinations.
+
+`prepare()` borrows/registers the caller's final allocation. `release()` must run
+before that allocation can move or be freed; it is safe to release registration
+while a CPU subscriber still owns the completed message. `run()` completes all
+GPU writes before returning. Serialize calls on each handle; no buffer can be
+mutated concurrently with its GPU use. Return code 1 from run means prelaunch
+argument rejection; code 2 means an execution failure and must stop the
+experimental GPU path. It must not silently reuse the output through a CPU
+fallback after an uncertain CUDA failure.
+
+Examples (same exclusive offline hardware conditions as above):
+
+```sh
+./native_benchmark --synthetic --mode registered-output --validate-only
+./native_benchmark --input fixtures --mode registered-output --validate-only
+./native_benchmark --input fixtures --mode registered-output \
+  --crop-start 1474 --crop-width 637 --validate-only
+taskset -c 2 ./native_benchmark --input fixtures --mode registered-output \
+  --iterations 32 --rounds 3 --period-ms 100 --trace-csv native-full-trace.csv \
+  > native-full.csv 2> native-full.log
+```
+
+Select `--mode staged` or `--mode registered-all` for the other ownership
+contracts. Each invocation compares with `cpu_native_fused`, which reads the
+same native-width arrays. This standalone CPU implementation still supplements,
+rather than replaces, the actual production-header CPU comparator. Synthetic
+native tests bound signal/reflectivity to their actual native ranges, retain
+u32 range conversion edges, and check odd grids, zero/invalid ranges, wrapping,
+all point bytes, density, malformed spans, replacement storage and old retained
+output after release/rebind.
+
+The native paced harness resets its release schedule before every method/round.
+It records per-frame processing wall/CPU time, start lateness and completion
+lateness in `--trace-csv`; trace rows are written after measurement. Per-round
+maximum call duration and lateness are also in the summary CSV. Validation,
+hashing, CSV output and output dumps occur outside each method's schedule.
+Inspect these traces before attributing missed releases to GPU execution,
+host scheduling, wake-up costs or frequency changes. Burst-only CPU results
+must not be compared directly with a paced GPU run.
+
+Keep `native_backend.h`, `native_backend.cu` and `native_benchmark.cpp` in source
+control. The optional ROS hook is an isolated experiment; this tooling does not
+install it, change production source pins or enable a CUDA backend by default.
+
+## Isolated ROS hook and startup validation
+
+The experimental ROS hook is developed in a separate source checkout. It loads
+the C ABI library only when `OUSTER_GPU_CLOUD_LIBRARY` is set. Use
+`OUSTER_GPU_CLOUD_REQUIRE=1` for a measured GPU trial so an unsupported
+configuration, unavailable backend or registration failure cannot silently
+turn that trial into a CPU run. The CPU default has no CUDA link dependency.
+
+Eligibility is deliberately narrow: original 48-byte points, LEGACY single
+return, organized and destaggered output, row step one, no range mask, and full
+or cropped columns. Only the combined driver's inspected synchronous
+const-reference publication callback opts into the immutable output contract.
+Arbitrary callbacks that may resize or swap the message's byte buffer remain
+on the CPU path, or fail when GPU use is required.
+
+The live hook uses output-only registration. Every frame copies native scan
+fields into persistent staging buffers, waits for GPU completion, and then
+publishes the ordinary CPU-owned `PointCloud2`. Registration is released before
+message replacement, allocation growth and processor destruction. Read-only
+retained messages remain valid after release. This is not zero-copy ROS
+transport, and the standalone registered-all mode is not the live hook's input
+ownership model.
+
+Set `OUSTER_GPU_CLOUD_VALIDATE_FRAMES=8` for initial live validation. The accepted
+range is 0–32; the default is zero, and CPU mode ignores this setting. For those
+first frames, the hook invokes the same CPU conversion on the same decoded scan
+and compares dimensions, fields, row/point strides, endianness, density and all
+output bytes before publication. A mismatch refuses publication. Success emits
+`EXPERIMENTAL_GPU_CLOUD_SHADOW_PASS`; no shadow conversion or allocation occurs
+after the configured count. Headers are set afterward through the unchanged
+common CPU/GPU path.
+
+Wait for that exact pass marker, then apply the chosen warmup before collecting
+timed samples. Do not include shadow work in a steady-state CPU comparison.
+`EXPERIMENTAL_GPU_CLOUD_ACTIVE` and the pass marker report the first compute
+duration, including output registration, native input staging and blocking
+completion. That duration excludes earlier CUDA/LUT setup and message
+allocation. No kernel is secretly prewarmed. Keep cold-start and lifecycle
+logs: the offline paced tests observed expensive first GPU calls after idle
+periods, so steady-state results alone do not establish deadline behavior.
+
+The local fake-backend tests cover exact full/wrapped output, read-only retained
+messages, stable-buffer reuse, release before allocation growth, unsupported
+configuration, missing libraries, mutable callback rejection, bounded shadow
+count, corrupted output rejection and invalid count settings. They supplement
+the native CUDA real-scan/negative tests above; they do not execute a GPU.
+
+The shadow-enabled experimental ROS revision is
+`d739e7395f39dfde1fc013d46d201ada57d2e911`, with SDK
+`dce1ef0debdec33cb9e9611b08bc9ec60ee1f73e`. Its local ARM64 component build and
+157-test main suite passed, including all eight GPU-hook tests. Exact tested
+source hashes and XML are retained in
+`var/gpu-next-20261113/ros-build-check/shadow-summary.json` and
+`shadow-main-tests.xml`. The native library tested on the Orin has SHA-256
+`7d65db112323fe1f0ffcfcc45d5cefdccb5530b15aa1af52e305438bd49ed5c4`.
+Its `native_backend.cu` source has SHA-256
+`2448116488b9d036f76804bcce721b5a342ead0e5f4a99ba3e636f7f0ca3bec5`;
+the C ABI header has SHA-256
+`291a0ef125db8d5a2b907487166b09dff239ebd63947b1e8e0f2feb7c22925a6`.
+It was built with CUDA toolkit 13.2 (nvcc 13.2.86), GCC 13.3.0 and the precise
+`sm_87` options above. The compiler image ID is
+`sha256:e62cff7a343574f4f151c2cb4875013c248323f560e1c801320bad50fe358e14`.
+The complete image gate subsequently passed 264 C++ tests and eight replay
+tests. All 14 runtime libraries exactly matched the tested installation; the
+derived image added only the native library and passed the 15-library eager
+ABI check. Evidence is in `var/gpu-next-20261113/validated-image-summary.json`.
+
+The ROS source remains in the local isolated checkout
+`var/ros-gpu-cloud-prototype-20261113` and the published
+[experiment/gpu-cloud-processing-20261113 branch](https://github.com/christomaszewski/ouster-ros/tree/experiment/gpu-cloud-processing-20261113).
+`var/gpu-next-20261113/ros-gpu-d739e73-source.tar.gz` preserves the complete
+source snapshot. The adjacent `.bundle` preserves the three experiment commits
+and requires base `53b2b4fa22417578826337166ffd594716edf15c`. These identify an
+experiment, not a production source-pin update.

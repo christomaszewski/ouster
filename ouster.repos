@@ -22,7 +22,10 @@
 # Image scratch/span reuse and direct PointCloud2 writes preserve output fields/layout.
 # Optional organized_cloud_crop retains fields/row alignment while reducing cloud width
 # to the metadata-derived azimuth interval; default full-frame output is unchanged.
-# Retained by fork branch codex/organized-azimuth-crop.
+# XYZ is fused into the final cloud write; native image reads and selected-ring
+# LaserScan extraction avoid intermediate full-frame copies. Telemetry coalescing
+# is optional (default per-packet) and is reset safely across reconfiguration.
+# Retention branch: perf/cpu-loop-telemetry-20261113.
 # See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
@@ -30,4 +33,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 3bf8744cedeaecfe21fd726898be6eb617229577
+    version: f80d05c7a1255a365cfa2a36e218dd988a077b59

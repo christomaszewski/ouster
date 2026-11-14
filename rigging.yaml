@@ -44,10 +44,10 @@ build:
   sources:
     - name: ouster-ros
       repo: https://github.com/christomaszewski/ouster-ros.git
-      ref: 3bf8744cedeaecfe21fd726898be6eb617229577 # = ouster.repos version
+      ref: f80d05c7a1255a365cfa2a36e218dd988a077b59 # = ouster.repos version
     - name: ouster-sdk
       repo: https://github.com/christomaszewski/ouster-sdk.git
-      ref: 71b8c20df39141f5ec5154ec8ce9afc69f00ae52 # = ouster-sdk.repos version
+      ref: dce1ef0debdec33cb9e9611b08bc9ec60ee1f73e # = ouster-sdk.repos version
 
 # One CPU runtime per architecture; no JetPack-specific variants. Rig injects the
 # catalog digest through the same full-image override the deploy compose already uses.
@@ -78,7 +78,7 @@ replay: {start: false}
 msgs:
   source:
     - repo: https://github.com/christomaszewski/ouster-ros.git
-      ref: 3bf8744cedeaecfe21fd726898be6eb617229577 # = ouster.repos version
+      ref: f80d05c7a1255a365cfa2a36e218dd988a077b59 # = ouster.repos version
       packages: [ouster_sensor_msgs]
 
 # Host-facing UDP ports rig doctor checks for clashes across sensors (host networking -> ports are

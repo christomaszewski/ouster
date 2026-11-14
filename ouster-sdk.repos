@@ -6,11 +6,13 @@
 # Legacy IMU backport: https://github.com/ouster-lidar/ouster-sdk/pull/727
 # Grayscale exposure selects sample values directly; beam correction fills one row scratch.
 # Multi-frame old/new equivalence tests preserve exposure state and the public SDK ABI.
-# Retained by fork branch codex/optimize-sdk-image-processing, including legacy IMU fix 8559d7c.
+# Exposure application combines passes while preserving intermediate rounding.
+# Retention branch: perf/exposure-pass-fusion-20261113.
+# Includes legacy IMU fix 8559d7c.
 # tools/fetch_upstream.py replaces the ROS checkout's bundled/submodule SDK and
 # records both actual source revisions in upstream-sources.json.
 repositories:
   ouster-sdk:
     type: git
     url: https://github.com/christomaszewski/ouster-sdk.git
-    version: 71b8c20df39141f5ec5154ec8ce9afc69f00ae52
+    version: dce1ef0debdec33cb9e9611b08bc9ec60ee1f73e

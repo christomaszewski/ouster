@@ -186,11 +186,14 @@ beam-correction histories, and joining or rejoining after a scene change can req
 brightness adjustment. The override retains continuous history. RGB tone mapping shared with
 color point clouds remains in the packet handler, independently of image subscribers.
 
-The fork also reuses image scratch buffers, destaggers contiguous row spans, and writes point
-fields directly into owned PointCloud2 buffers. The SDK uses smaller, contiguous exposure and
-beam-correction scratch. Message field layouts and sensor settings remain unchanged. See the
-[real-sensor comparison](docs/cpu-demand-optimization-2026-11-13.md) for validation, CPU/cache
-measurements, subscriber transitions and the loop-unrolling experiment.
+The fork also reads decoded image fields directly, reuses image scratch buffers, and destaggers
+contiguous row spans. Cloud conversion calculates XYZ while writing the final PointCloud2
+buffer, avoiding the full XYZ intermediate. The SDK uses smaller, contiguous exposure and
+beam-correction scratch and combines exposure passes while preserving rounding. Message field
+layouts and sensor settings remain unchanged. See the
+[initial real-sensor comparison](docs/cpu-demand-optimization-2026-11-13.md) for subscriber
+transitions and loop unrolling, and the [follow-up study](docs/cpu-next-2026-11-13.md) for
+fused cloud conversion, native image reads and selected-ring LaserScan measurements.
 
 ### Cropped organized clouds
 
@@ -210,8 +213,8 @@ does not carry the origin, so consumers that require original sensor-column indi
 derive it from the sensor metadata and the configured destagger/row reduction settings.
 Consumers must also accept the smaller dimensions.
 
-The crop reduces cloud Cartesian calculation and packing work. Full scan and XYZ scratch
-allocations remain; image, LaserScan and raw-packet layouts retain their existing behavior.
+The crop reduces cloud Cartesian calculation and packing work. Full SDK scan storage remains;
+image, LaserScan and raw-packet layouts retain their existing behavior.
 The option does not set the sensor azimuth window itself. Full-azimuth output keeps its
 full dimensions. See the [crop and GPU study](docs/cpu-crop-gpu-2026-11-13.md) for the
 real-sensor comparison and the separate GPU test's scope.
@@ -248,6 +251,15 @@ token in the `proc_mask` driver param (node default `IMU|PCL|SCAN|IMG|RAW|TLM`; 
 disable). `ouster_sensor_msgs` is already pinned in `rigging.yaml`'s `msgs:` block, so the
 fleet bag logger can record it as-is. This topic carries thermal status flags, not temperature
 measurements, and goes **silent in standby** because it is derived from lidar packets.
+
+For a lower-rate heartbeat of unchanged thermal status, set
+`driver_params.telemetry_max_rate_hz: 10.0`. The default is `0.0`, which retains one telemetry
+message per lidar packet. Any change in either status or countdown publishes immediately,
+so changes can exceed the selected heartbeat rate. Headers still come from the received
+packet; no message is synthesized when packets stop. This option reduces telemetry samples
+available to recorders; it does not change clouds, images, IMU, raw packets, or sensor settings.
+The combined driver reads it when publishers are configured, so apply it through the normal
+configuration/restart workflow. The temperature topic's HTTP polling is independent.
 
 ## Operational states (`standby` / `activate` / `state`)
 
@@ -384,6 +396,10 @@ The images ship both `rmw_fastrtps_cpp` (default) and `rmw_zenoh_cpp`; export
 `RMW_IMPLEMENTATION=rmw_zenoh_cpp` before `ouster-up` to switch. The driver never runs the Zenoh
 router — that is rig-managed infrastructure the session connects out to (endpoint overridable via
 `ZENOH_CONFIG_OVERRIDE`) — see [docker/README.md](docker/README.md) "RMW selection / Zenoh".
+
+The [CPU/GPU follow-up study](docs/cpu-next-2026-11-13.md) covers fused cloud construction,
+native image reads, selected-ring LaserScan extraction, telemetry coalescing, and isolated
+shared-memory/CUDA experiments. The default runtime remains CPU based.
 
 ## Updating upstream
 
