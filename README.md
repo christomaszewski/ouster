@@ -245,16 +245,21 @@ operational state. No zero or previous reading is substituted. `sensor_msgs` is 
 interface, so recording this topic needs no additional fleet message package.
 
 The driver publishes `ouster_sensor_msgs/msg/Telemetry` on **`/<ns>/telemetry`**:
-thermal-shutdown and shot-limiting status plus their countdowns, stamped from every lidar
-packet's header (packet rate — ~640 msgs/s at 1024x10). It is **on by default** via the `TLM`
+thermal-shutdown and shot-limiting status plus their countdowns, stamped from a received lidar
+packet. It is **on by default** via the `TLM`
 token in the `proc_mask` driver param (node default `IMU|PCL|SCAN|IMG|RAW|TLM`; drop `TLM` to
 disable). `ouster_sensor_msgs` is already pinned in `rigging.yaml`'s `msgs:` block, so the
 fleet bag logger can record it as-is. This topic carries thermal status flags, not temperature
 measurements, and goes **silent in standby** because it is derived from lidar packets.
+LEGACY packets omit all four status/countdown fields; the SDK returns zeros for unavailable
+fields, so this topic acts as a packet-arrival heartbeat in that profile. HTTP temperature
+and sensor-alert polling remain independent.
 
-For a lower-rate heartbeat of unchanged thermal status, set
-`driver_params.telemetry_max_rate_hz: 10.0`. The default is `0.0`, which retains one telemetry
-message per lidar packet. Any change in either status or countdown publishes immediately,
+Starting with v0.7.0, the service defaults to
+`driver_params.telemetry_max_rate_hz: 10.0` for unchanged status. Set `0.0` explicitly to retain
+one telemetry message per lidar packet (about 640/s at 1024×10 or 1,280/s at 2048×10).
+The standalone ROS driver's default remains `0.0`; the service supplies its default when
+rendering parameters. Any change in either status or countdown publishes immediately,
 so changes can exceed the selected heartbeat rate. Headers still come from the received
 packet; no message is synthesized when packets stop. This option reduces telemetry samples
 available to recorders; it does not change clouds, images, IMU, raw packets, or sensor settings.
@@ -406,7 +411,7 @@ measures complete configurations with the real sensor and unchanged full-width c
 outputs. Optimized CPU with explicit `driver_params.telemetry_max_rate_hz: 10.0` reduces
 service CPU by 54.30% in that graph and is the recommended practical configuration. GPU plus
 experimental direct SHM serialization reaches 64.07%; its deployment limitations are documented
-in the report. The telemetry default remains unlimited.
+in the report. The v0.7.0 service default is 10 Hz; explicit `0.0` restores unlimited telemetry.
 
 ## Updating upstream
 
@@ -528,7 +533,8 @@ in standby, while skipping transitions. Power is input mV × mA / 1,000,000 watt
 readings are not zero. The existing temperature topic remains available.
 
 Stream health samples the driver's `telemetry` topic once per heartbeat instead of handling
-every message. The driver publishes one message per lidar packet (640 to 1,280 per second); the
+every message. With unlimited telemetry the driver publishes one message per lidar packet
+(640 to 1,280 per second); the
 health node keeps only the newest in a depth-1 subscription that its executor never waits on,
 and each heartbeat takes it without deserializing. Measured in the runtime image on a 2.3 GHz
 x86-64 core with Fast DDS, a Python callback per packet cost 20% of a core at 640 packets/s and

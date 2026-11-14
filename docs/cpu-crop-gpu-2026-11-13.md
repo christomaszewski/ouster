@@ -33,7 +33,7 @@ The implementation skips Cartesian/mask arithmetic and cloud packing outside the
 
 ## Source, builds and validation
 
-- ROS: `3bf8744cedeaecfe21fd726898be6eb617229577`, based on `36baee96d0d9f4147e7adcc25db502e7dd812e19`, retained on [codex/organized-azimuth-crop](https://github.com/christomaszewski/ouster-ros/tree/codex/organized-azimuth-crop) in the ROS fork.
+- ROS: [`3bf8744cedeaecfe21fd726898be6eb617229577`](https://github.com/christomaszewski/ouster-ros/commit/3bf8744cedeaecfe21fd726898be6eb617229577), based on `36baee96d0d9f4147e7adcc25db502e7dd812e19` in the ROS fork.
 - SDK unchanged: `71b8c20df39141f5ec5154ec8ce9afc69f00ae52`.
 - Mac-built native Linux ARM64 runtime: `ouster_driver:cpu-crop-organized-v1`, digest `sha256:c3807d4036dae677cd3e3f38b0d8895c6fe320b13999416d6db296bf2feab518`.
 - Regression image: `ouster_driver:cpu-crop-organized-v1-tests`, digest `sha256:1e958d2087a79c8c14cfcf4b238003bb3af101b8aa475b139122cbdc69621d98`.

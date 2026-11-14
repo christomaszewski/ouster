@@ -40,7 +40,7 @@ The separate **B3–D1–D2–B4** sequence measured the additional row-loop cha
 
 Driver CPU differed by only −0.025 percentage points (−0.053% relative), while service CPU increased 0.031 points. This is **effectively unchanged total CPU**, within the observed run variation. Cycles decreased 0.89% and instructions 0.54%; those small counter differences support reduced work but do not establish a material service-CPU benefit. Both D trials retained the identical parameters, sensor settings, full cloud schema and approximately 10.00 Hz delivery, with no timestamp gaps over 150 ms or new UDP errors. The small change is retained for its simpler invariant indexing and verified generated code, without claiming an additional practical CPU reduction.
 
-The final wrapper pins D in all three ROS/message-source locations. Its ancestry includes B and is retained on [the tested fork branch](https://github.com/christomaszewski/ouster-ros/tree/codex/backport-cloud-conversion-optimizations).
+The final wrapper pins D in all three ROS/message-source locations. Its ancestry includes B; see [the tested fork commit](https://github.com/christomaszewski/ouster-ros/commit/82a46b870451d9dac2d9eb1db8a953a6bff1d3b9).
 
 The separate **B4–C1–C2–B5** sequence used the unchanged B driver component in the stock EventsCBG container. B4 also closes the preceding loop comparison; these are matched pairs, not independent additional samples.
 

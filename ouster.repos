@@ -24,7 +24,8 @@
 # to the metadata-derived azimuth interval; default full-frame output is unchanged.
 # XYZ is fused into the final cloud write; native image reads and selected-ring
 # LaserScan extraction avoid intermediate full-frame copies. Telemetry coalescing
-# is optional (default per-packet) and is reset safely across reconfiguration.
+# is reset safely across reconfiguration. The ROS default is per-packet; this service
+# supplies a 10 Hz default, with explicit telemetry_max_rate_hz: 0.0 to opt out.
 # Retention branch: perf/cpu-loop-telemetry-20261113.
 # See README "Updating upstream".
 #

@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -155,6 +157,40 @@ exit 0
         result = self.run_launcher("config")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("shutdown=standby", self.log.read_text())
+
+    def test_telemetry_default_and_explicit_overrides_reach_driver(self):
+        original = yaml.safe_load(self.config.read_text())
+        for requested in (None, 0.0, 2.5):
+            with self.subTest(requested=requested):
+                config = dict(original, driver_params=dict(original["driver_params"]))
+                config["driver_params"].pop("telemetry_max_rate_hz", None)
+                if requested is not None:
+                    config["driver_params"]["telemetry_max_rate_hz"] = requested
+                self.config.write_text(yaml.safe_dump(config))
+                for old in (self.root / "var/run").glob("*.params.yaml"):
+                    old.unlink()
+                result = self.run_launcher("config")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                files = list((self.root / "var/run").glob("top.*.params.yaml"))
+                self.assertEqual(len(files), 1)
+                params = yaml.safe_load(files[0].read_text())
+                actual = params["/**"]["ros__parameters"]
+                self.assertEqual(actual["telemetry_max_rate_hz"],
+                                 10.0 if requested is None else requested)
+                self.assertIsInstance(actual["telemetry_max_rate_hz"], float)
+                self.assertEqual(actual["sensor_hostname"], "192.168.1.50")
+                self.assertEqual(actual["point_type"], original["driver_params"]["point_type"])
+
+    def test_telemetry_default_without_driver_params(self):
+        config = yaml.safe_load(self.config.read_text())
+        config.pop("driver_params")
+        self.config.write_text(yaml.safe_dump(config))
+        result = self.run_launcher("config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = list((self.root / "var/run").glob("top.*.params.yaml"))
+        self.assertEqual(len(files), 1)
+        params = yaml.safe_load(files[0].read_text())
+        self.assertEqual(params["/**"]["ros__parameters"]["telemetry_max_rate_hz"], 10.0)
 
     def test_shutdown_unchanged_is_forwarded(self):
         self.config.write_text(self.config.read_text().replace("shutdown_state: standby", "shutdown_state: unchanged"))

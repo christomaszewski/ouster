@@ -187,7 +187,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # vcstool makes the hermetic local-Git fetch/submodule regressions execute.
-      - run: python3 -m pip install --user pyyaml vcstool
+      # vcstool 0.3.0 imports pkg_resources, removed from newer setuptools.
+      - run: python3 -m pip install --user pyyaml vcstool 'setuptools<81'
       - name: lifecycle and launcher regressions
         run: python3 -m unittest discover -s tests -v
 

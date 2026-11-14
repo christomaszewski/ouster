@@ -71,7 +71,10 @@ driver_params:
                                   # or sensor_frame. Invalid choice warns and falls back to lidar_frame.
   # pub_static_tf: true         # publish sensor/lidar/IMU transforms; false for an external TF source
   # proc_mask: IMU|PCL|SCAN|IMG|RAW|TLM # enable processors with these pipe-separated tokens
-  # TLM publishes per-packet /<ns>/telemetry (thermal/shot-limiting state). It is silent in standby.
+  # TLM publishes /<ns>/telemetry (thermal/shot-limiting state). It is silent in standby.
+  telemetry_max_rate_hz: 10.0   # service default; 0.0 restores one message per lidar packet
+  # Status/countdown changes publish immediately, even above this unchanged-status heartbeat rate.
+  # LEGACY packets omit these fields: their zeros mean unavailable, so TLM is a stream heartbeat.
   # Health uses TLM arrivals to detect missing streaming when active; dropping TLM disables that
   # stream check, but HTTP temperature/power/alerts and /diagnostics continue independently.
   # scan_ring: 0                # beam used for LaserScan (SCAN); 0..sensor beam count - 1

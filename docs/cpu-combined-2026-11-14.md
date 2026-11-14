@@ -47,7 +47,7 @@ driver_params:
   telemetry_max_rate_hz: 10.0
 ```
 
-This setting changes the telemetry recording contract: unchanged statuses are coalesced to approximately 10 Hz, while status/countdown changes publish immediately. Keep the default `0.0` if a consumer requires per-packet telemetry; the optimized CPU-default row then gives the measured result. The independent HTTP temperature topic is unchanged.
+This setting changes the telemetry recording contract: unchanged statuses are coalesced to approximately 10 Hz, while status/countdown changes publish immediately. Set `0.0` explicitly if a consumer requires per-packet telemetry; the optimized CPU-default row then gives the measured result. The independent HTTP temperature topic is unchanged. Starting with v0.7.0, the service supplies 10 Hz when the setting is omitted; the standalone ROS driver retains its per-packet default.
 
 **Lowest measured service CPU: GPU plus direct SHM serialization and 10 Hz telemetry.** It saves a further 6.90 percentage points of one core in service CPU compared with the recommended CPU/10 Hz option. Both GPU runs pass eight exact same-scan CPU comparisons before timing and clean shutdown afterward. This remains an experimental deployment: the backend has narrow LEGACY/original/organized layout support, earlier standalone trials observed 134–145 ms idle-resume calls, and the middleware change is outside the production fleet pin. These CPU measurements do not establish deadline guarantees, energy savings or performance under a simultaneous camera/GPU workload. The CPU/direct-SHM option also remains experimental; its additional service saving over the production CPU/10 Hz option is 2.02 points of one core.
 

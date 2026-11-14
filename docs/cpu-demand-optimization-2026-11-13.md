@@ -15,7 +15,7 @@ This follow-up implements the opportunities identified in the [initial CPU profi
 | SDK baseline | `8aa86b94b1c75dfcb99159a4147b44d973e52323` | Existing pinned SDK fork |
 | Final SDK | `71b8c20df39141f5ec5154ec8ce9afc69f00ae52` | Direct grayscale samples (`4e23898`), beam-correction row scratch (`986542c`), optional benchmark (`71b8c20`) |
 
-The final commits are retained on the user fork branches [ROS demand-driven-processing](https://github.com/christomaszewski/ouster-ros/tree/codex/demand-driven-processing) and [SDK optimize-sdk-image-processing](https://github.com/christomaszewski/ouster-sdk/tree/codex/optimize-sdk-image-processing). The wrapper ROS/message and SDK source pins select these exact revisions. The SDK remains on the existing version lineage. Its public image-processing header and class layouts are unchanged.
+The final commits are retained in the user forks: [ROS demand-driven processing](https://github.com/christomaszewski/ouster-ros/commit/36baee96d0d9f4147e7adcc25db502e7dd812e19) and [SDK image processing](https://github.com/christomaszewski/ouster-sdk/commit/71b8c20df39141f5ec5154ec8ce9afc69f00ae52). The wrapper ROS/message and SDK source pins select these exact revisions. The SDK remains on the existing version lineage. Its public image-processing header and class layouts are unchanged.
 
 The combined Linux ARM64 image is `ouster_driver:cpu-demand-combined-v1`, built on the Mac from those two final revisions. Its recorded digest is `sha256:3cc43ada800edde4a590140630ee9ebc8875f25336e6cf295a22790eb200f894`. Build inputs and logs are in [combined-v1](../var/demand-build-2026-11-13/combined-v1/). Production compiler settings remain Release `-O3 -DNDEBUG`; the separate unrolling experiment below does not alter them.
 
