@@ -20,7 +20,9 @@
 # Point fields, layout and sensor settings are unchanged.
 # Images process only demanded channels by default, with image_always_process as an override.
 # Image scratch/span reuse and direct PointCloud2 writes preserve output fields/layout.
-# Retained by fork branch codex/demand-driven-processing.
+# Optional organized_cloud_crop retains fields/row alignment while reducing cloud width
+# to the metadata-derived azimuth interval; default full-frame output is unchanged.
+# Retained by fork branch codex/organized-azimuth-crop.
 # See README "Updating upstream".
 #
 # A LAN mirror must cover both manifests and any upstream submodules; retain all pinned refs.
@@ -28,4 +30,4 @@ repositories:
   ouster-ros:
     type: git
     url: https://github.com/christomaszewski/ouster-ros.git
-    version: 36baee96d0d9f4147e7adcc25db502e7dd812e19
+    version: 3bf8744cedeaecfe21fd726898be6eb617229577

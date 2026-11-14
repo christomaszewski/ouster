@@ -44,7 +44,7 @@ build:
   sources:
     - name: ouster-ros
       repo: https://github.com/christomaszewski/ouster-ros.git
-      ref: 36baee96d0d9f4147e7adcc25db502e7dd812e19 # = ouster.repos version
+      ref: 3bf8744cedeaecfe21fd726898be6eb617229577 # = ouster.repos version
     - name: ouster-sdk
       repo: https://github.com/christomaszewski/ouster-sdk.git
       ref: 71b8c20df39141f5ec5154ec8ce9afc69f00ae52 # = ouster-sdk.repos version
@@ -78,7 +78,7 @@ replay: {start: false}
 msgs:
   source:
     - repo: https://github.com/christomaszewski/ouster-ros.git
-      ref: 36baee96d0d9f4147e7adcc25db502e7dd812e19 # = ouster.repos version
+      ref: 3bf8744cedeaecfe21fd726898be6eb617229577 # = ouster.repos version
       packages: [ouster_sensor_msgs]
 
 # Host-facing UDP ports rig doctor checks for clashes across sensors (host networking -> ports are

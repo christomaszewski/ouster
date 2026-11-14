@@ -1,0 +1,203 @@
+# Standalone decoded-scan CUDA experiment
+
+This is a bounded benchmark, **not a production Ouster ROS GPU backend**. It
+accepts single-return LEGACY scans and emits the original organized 48-byte
+PointCloud2 point representation. UDP reception, SDK packet decoding, ROS
+publication/serialization, lifecycle management and image processing are outside
+the GPU benchmark. Keep the production CPU driver as the default.
+
+The first study uses SDK `71b8c20df39141f5ec5154ec8ce9afc69f00ae52` and ROS
+`36baee96d0d9f4147e7adcc25db502e7dd812e19`. Exporter headers and the linked SDK
+archive must come from the same intended production build. Record their exact
+revisions and build-image identity alongside results.
+
+## What is compared
+
+`cloud_benchmark` runs four implementations in rotating order:
+
+- `cpu_staged`: full-scan Cartesian scratch followed by organized field packing.
+- `cpu_fused`: Cartesian calculation and packing in one pass over requested
+  output columns. This prevents crediting ordinary CPU fusion savings to CUDA.
+- `gpu_device_copy`: persistent device input/output plus persistent pinned host
+  staging; upload, fused kernel, download and ordinary-host output copy.
+- `gpu_mapped_io`: persistent mapped pinned input/output and device-resident
+  calibration LUTs; fused kernel followed by ordinary-host output copy.
+
+Both GPU timings include copying the pageable decoded input into pinned input,
+kernel submission, all required transfers/coherence, a blocking completion wait,
+the complete final ordinary-host cloud copy, and the density result. The GPU
+kernel combines range rejection, float32 FMA XYZ, destagger indexing, timestamp
+mapping and field packing. LUTs, allocations, context setup, validation and
+checksums are outside timing. The process uses
+`cudaDeviceScheduleBlockingSync` and a `cudaEventBlockingSync` completion event;
+CPU usage therefore does not depend on an intentional polling wait.
+
+The separate `cpu_production_benchmark` invokes the actual production
+`cartesianT` and original cloud writer headers, rather than the benchmark's
+standalone CPU implementation. Its full-frame output is written directly into
+the normal ROS CPU buffer. Its optional crop mode is explicitly named
+`cpu_production_full_then_crop`: it materializes the full cloud before cropping
+and is **not** the optimized cropped production-driver baseline.
+
+Reported `wall_ms` and `cpu_ms` cover **all iterations in that row**, not one
+frame. Divide by `iterations` for a per-frame value. CPU time is process CPU
+time; wall time includes GPU waiting. Timings replay captured frames as quickly
+as possible, not at the sensor's 10 Hz cadence. They are not ROS service CPU,
+sensor-to-publication latency, energy measurements or guaranteed GPU speedups.
+
+## Capture and export
+
+Capture raw `/lidar_packets` messages and the complete sensor metadata while the
+normal service owns the sensor. The input record file is a sequence of:
+
+```
+uint32 little-endian payload_length
+payload_length raw lidar packet bytes
+```
+
+Use a full 360-degree LEGACY capture with complete scans. No host timestamp is
+needed. The exporter skips incomplete scans, derives `scan_ts` from column zero,
+uses the production `lidar_to_sensor_transform`, and sets frame `os_sensor`.
+The initial scope has no input mask and uses every row. Specify the exact
+driver range limits in millimeters; the study used 0 and 1,000,000.
+
+Build the SDK/ROS exporter in a retained compatible Linux ARM64 build image:
+
+```sh
+export OUSTER_GPU_EXPORT_IMAGE=ouster_driver:cpu-demand-combined-v1-tests
+export OUSTER_GPU_ROS_SOURCE=/workspace/src/ouster-ros/ouster-ros
+export OUSTER_GPU_SDK_BUILD=/workspace/build/ouster_ros/ouster-sdk
+sh exporter-build.sh . ./bin
+```
+
+These image paths are study defaults; override them for another build layout.
+Alternatively configure CMake directly with `BUILD_EXPORTER=ON`, `ROS_SOURCE`
+and either an installed `OusterSDK` package or `SDK_BUILD` pointing at the
+matching retained static SDK archive. A compatible ROS environment must be
+sourced. The exporter and production CPU executable need that ROS runtime;
+they are not standalone system executables.
+
+Inside the matching runtime, with capture and output directories mounted:
+
+```sh
+./export_scan metadata.json lidar_packets.bin fixtures 8 0 1000000
+./cpu_production_benchmark fixtures 64 7 > cpu-production.csv
+```
+
+Each fixture directory contains `manifest.txt`, little-endian row-major arrays,
+and an independently generated `reference.cloud48`:
+
+| File | Representation |
+| --- | --- |
+| `range.u32`, `signal.u32` | `H*W` unsigned 32-bit values; native LEGACY signal is widened offline |
+| `reflectivity.u16`, `near_ir.u16` | `H*W` unsigned 16-bit values; native LEGACY reflectivity is widened offline |
+| `timestamps.u64` | `W` column timestamps |
+| `shifts.i32` | `H` raw row shifts |
+| `direction.f32`, `offset.f32` | `H*W*3` production-cast float32 calibration values |
+| `reference.cloud48` | Full organized cloud generated by actual production headers |
+
+The standardized widened inputs make the fixture self-contained; a future
+native-type GPU backend could have different input traffic. The exporter
+requires the standalone CPU calculation to match its production reference
+bit-for-bit before accepting a frame.
+
+For an external anchor, also save published full clouds and `capture.json`.
+Each entry in its `clouds` array must contain `file`, `stamp_sec`, `stamp_nanosec`,
+`width`, `height`, `point_step`, `row_step`, `frame_id`, and `fields`. The `fields`
+array records every field's `name`, `offset`, `datatype`, and `count` in message
+order. The checker requires the recorded schema as well as the point bytes:
+
+```sh
+python3 check_published.py capture fixtures published-equivalence.json
+```
+
+The script matches exact timestamps and checks all registered field bytes plus
+the homogeneous float at offset 12. It excludes unspecified padding at bytes
+30–31 and 36–47. Every exported fixture must have a matching published frame.
+Dimensions, frame name, field layout and strides must match the fixed contract;
+missing frames or schema differences fail the check. Report the number matched,
+not merely the exit status.
+
+## Build CUDA locally
+
+The studied Orin is compute capability 8.7. Its compatible exported CUDA 13.2
+toolkit and a Linux ARM64 GCC 13 compiler container were used to build on the
+Mac. No GPU is needed to compile. Do not substitute arbitrary toolkit/driver
+versions without checking compatibility.
+
+```sh
+docker build --platform linux/arm64 -f Dockerfile.compiler \
+  -t ouster-cuda-compiler:ubuntu24-gcc13 .
+export OUSTER_CUDA_TOOLKIT=/path/to/compatible/cuda-13.2
+export OUSTER_CUDA_COMPILER_IMAGE=ouster-cuda-compiler:ubuntu24-gcc13
+bash build_cuda_docker.sh ./build
+```
+
+The toolkit directory must contain `bin/nvcc`, `nvvm` (including libdevice),
+headers and static runtime libraries under `targets/sbsa-linux`. It is an
+external prerequisite, obtained from a compatible CUDA installation; neither
+the toolkit nor target driver is downloaded by these scripts. The compiler
+Dockerfile pins its Ubuntu image and GCC package versions. If those packages
+leave the repository, select and revalidate an available compatible compiler
+explicitly rather than silently changing the toolchain.
+
+Or run `build_cuda.sh OUTPUT_DIRECTORY` directly in a suitable ARM64 Linux
+compiler environment. Set `OUSTER_CUDA_ROOT` and `OUSTER_CUDA_HOST_COMPILER` if
+needed. The binary statically links the CUDA runtime, still requires the target
+NVIDIA driver, and does not bundle driver libraries. Compiler flags are `-O3`,
+`sm_87`, precise math and no flush-to-zero; **no `--use_fast_math`**. The current
+production ARM64 Cartesian code uses FMA; this test uses explicit CPU
+`std::fma` and GPU `__fmaf_rn` to match it.
+
+Portable CPU-only checking, including odd grids and wraparound columns:
+
+```sh
+c++ -std=c++17 -O3 -DCLOUD_CPU_ONLY -x c++ cloud_benchmark.cu -o cpu-check
+./cpu-check --synthetic --validate-only
+./cpu-check --input fixtures --validate-only
+./cpu-check --input fixtures --crop-start 1920 --crop-width 256 --validate-only
+```
+
+## Run on the Orin
+
+Run only when other profiling jobs are stopped. Keep sensor/power/governor
+settings unchanged and record them. First check synthetic edge cases and real
+reference agreement; then collect timings:
+
+```sh
+./cloud_benchmark --synthetic --validate-only
+./cloud_benchmark --input fixtures --validate-only
+./cloud_benchmark --input fixtures --iterations 64 --rounds 7 \
+  --output-dir output-full > full.csv 2> full.log
+./cloud_benchmark --input fixtures --crop-start 768 --crop-width 512 \
+  --iterations 64 --rounds 7 --output-dir output-crop > crop.csv 2> crop.log
+```
+
+Every method and every captured frame is checked before timing, and the final
+timed output is checked after each round. Output dumps contain complete
+host-accessible point data. Exact finite float bits, NaN bits/locations,
+timestamps, fields, homogeneous coordinate, padding and `is_dense` are compared
+inside the benchmark. A failure exits nonzero. There is no timing pass/fail
+threshold and no silent approximate-XYZ fallback.
+
+`--crop-start` and `--crop-width` select a rectangular window of **global
+destaggered output columns**, optionally wrapping through column zero. Height
+and 48-byte point stride remain unchanged. Existing point timestamps and ring
+indices remain tied to the original source columns/rows. This standalone option
+does not infer an azimuth window, mutate sensor configuration, provide ROS crop
+metadata or remove per-row invalid areas caused by destagger geometry.
+
+Compare whole-path wall time and process CPU against both CPU competitors;
+inspect run variation before drawing conclusions. Profile at sensor cadence,
+with competing GPU workloads and power measurements before considering a
+production backend. GPU output still incurs normal host ROS publication and the
+unchanged full-cloud schema bandwidth if integrated.
+
+## Files to retain in source control
+
+Retain this README, `Dockerfile.compiler`, `CMakeLists.txt`, `cloud_common.hpp`, `cloud_benchmark.cu`,
+`export_scan.cpp`, `cpu_production_benchmark.cpp`, `build_cuda.sh`,
+`build_cuda_docker.sh`, `exporter-build.sh` and `check_published.py`.
+Keep captured data/metadata, fixture clouds, toolkits, compiler images, binaries,
+logs and timing artifacts outside the tracked source directory. This tooling
+does not change wrapper source pins or select a production GPU implementation.

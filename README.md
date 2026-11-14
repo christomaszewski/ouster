@@ -192,6 +192,30 @@ beam-correction scratch. Message field layouts and sensor settings remain unchan
 [real-sensor comparison](docs/cpu-demand-optimization-2026-11-13.md) for validation, CPU/cache
 measurements, subscriber transitions and the loop-unrolling experiment.
 
+### Cropped organized clouds
+
+Set `driver_params.organized_cloud_crop: true` together with `organized: true` to
+publish only the organized column interval needed by the sensor's configured azimuth
+window. The default is `false`. The crop retains point fields, their offsets and stride,
+row organization, timestamps and coordinates; `width`, `row_step` and data length change.
+It takes effect when the cloud handler is configured, in both the combined driver and
+the separate cloud component.
+
+The interval is derived from metadata and stays fixed while that configuration is active.
+It covers the union of the selected rows' destaggered columns, so edge holes remain NaN
+and a half-revolution window can require more than half the original columns. Each row
+uses the same original-column interval, including wraparound; rows are not compacted
+independently. The driver logs the crop's original column origin and width. PointCloud2
+does not carry the origin, so consumers that require original sensor-column indices must
+derive it from the sensor metadata and the configured destagger/row reduction settings.
+Consumers must also accept the smaller dimensions.
+
+The crop reduces cloud Cartesian calculation and packing work. Full scan and XYZ scratch
+allocations remain; image, LaserScan and raw-packet layouts retain their existing behavior.
+The option does not set the sensor azimuth window itself. Full-azimuth output keeps its
+full dimensions. See the [crop and GPU study](docs/cpu-crop-gpu-2026-11-13.md) for the
+real-sensor comparison and the separate GPU test's scope.
+
 ### Temperature and thermal status
 
 The wrapper publishes **`/<ns>/temperature`** as `sensor_msgs/msg/Temperature` from the

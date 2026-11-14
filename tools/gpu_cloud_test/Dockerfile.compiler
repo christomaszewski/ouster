@@ -1,0 +1,12 @@
+FROM ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      g++-13=13.3.0-6ubuntu2~24.04.1 \
+      gcc-13=13.3.0-6ubuntu2~24.04.1 \
+      binutils make \
+    && rm -rf /var/lib/apt/lists/*
+ENV CUDA_HOME=/usr/local/cuda-13.2
+ENV PATH=/usr/local/cuda-13.2/bin:${PATH}
+ENV CXX=/usr/bin/g++-13
+ENV CC=/usr/bin/gcc-13
+ENV CUDAHOSTCXX=/usr/bin/g++-13
+WORKDIR /work
