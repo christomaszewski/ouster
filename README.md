@@ -401,6 +401,13 @@ The [CPU/GPU follow-up study](docs/cpu-next-2026-11-13.md) covers fused cloud co
 native image reads, selected-ring LaserScan extraction, telemetry coalescing, and isolated
 shared-memory/CUDA experiments. The default runtime remains CPU based.
 
+The [combined comparison against the original driver](docs/cpu-combined-2026-11-14.md)
+measures complete configurations with the real sensor and unchanged full-width cloud/image
+outputs. Optimized CPU with explicit `driver_params.telemetry_max_rate_hz: 10.0` reduces
+service CPU by 54.30% in that graph and is the recommended practical configuration. GPU plus
+experimental direct SHM serialization reaches 64.07%; its deployment limitations are documented
+in the report. The telemetry default remains unlimited.
+
 ## Updating upstream
 
 1. Rebase the ROS fixes onto a compatible upstream release, run their regressions, and publish
